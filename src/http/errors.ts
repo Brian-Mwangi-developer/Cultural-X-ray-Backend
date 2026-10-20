@@ -5,15 +5,28 @@ import { config } from "@/config/env";
 import { errorDetails, logger } from "@/observability/logger";
 import { httpErrorsTotal } from "@/observability/metrics";
 
+/**
+ * An expected failure. For 4xx the message is shown to people as written, so write it
+ * for them; `code` is a stable identifier the web app can branch on.
+ */
 export class HttpError extends Error {
+  readonly code: string;
+  readonly details?: unknown;
+
   constructor(
     readonly status: number,
     message: string,
-    readonly details?: unknown,
+    options: { code?: string; details?: unknown } = {},
   ) {
     super(message);
     this.name = "HttpError";
+    this.code = options.code ?? defaultCode(status);
+    this.details = options.details;
   }
+}
+
+function defaultCode(status: number) {
+  return { 400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 410: "GONE" }[status] ?? "ERROR";
 }
 
 export const routeLabel = (req: Request) => (req.route?.path ? `${req.baseUrl}${req.route.path}` : "unmatched");
@@ -26,12 +39,12 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
   const route = routeLabel(req);
   if (error instanceof ZodError) {
     httpErrorsTotal.inc({ route, status_code: "400", kind: "validation" });
-    res.status(400).json({ error: { message: "Invalid request", issues: error.issues } });
+    res.status(400).json({ error: { code: "INVALID_INPUT", message: error.issues[0]?.message ?? "Check the details and try again", issues: error.issues } });
     return;
   }
   if (error instanceof HttpError) {
     httpErrorsTotal.inc({ route, status_code: String(error.status), kind: "expected" });
-    res.status(error.status).json({ error: { message: error.message, ...(error.details ? { details: error.details } : {}) } });
+    res.status(error.status).json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } });
     return;
   }
 
@@ -40,6 +53,7 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
   logger.error({ reference, route, method: req.method, requestId: req.headers["x-request-id"], ...errorDetails(error) }, "unhandled request error");
   res.status(500).json({
     error: {
+      code: "SERVER_ERROR",
       message: "Something went wrong on our side",
       reference,
       ...(!config.isProduction && error instanceof Error ? { debug: error.message } : {}),
