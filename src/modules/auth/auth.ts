@@ -42,6 +42,9 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,
+    maxPasswordLength: 128,
+    revokeSessionsOnPasswordReset: true,
+    resetPasswordTokenExpiresIn: 60 * 60,
     // No session until the address is confirmed; the confirmation link signs you in.
     requireEmailVerification: true,
     sendResetPassword: async ({ user, url }) => {
