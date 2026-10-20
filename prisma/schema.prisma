@@ -1,0 +1,927 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OrgKind {
+  AGENCY
+  WORKSPACE
+}
+
+enum Market {
+  US
+  GB
+}
+
+enum AccessLevel {
+  VIEW
+  EDIT
+  MANAGE
+}
+
+enum ConnectionStatus {
+  REQUESTED
+  ACTIVE
+  DECLINED
+  ENDED
+}
+
+enum ConnectionOrigin {
+  AGENCY_REQUEST
+  WORKSPACE_CODE
+  AGENCY_CREATED
+}
+
+enum EndedBy {
+  AGENCY
+  WORKSPACE
+}
+
+enum ClaimStatus {
+  PENDING
+  CLAIMED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+enum Plan {
+  FREE
+  OWNER
+  AGENCY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  GRACE
+  READ_ONLY
+  CANCELLED
+}
+
+enum UsageKind {
+  MAP_BUILD
+  AD_CHECK
+  BRIEF
+  LOCALIZE
+  OTHER
+}
+
+enum EntityKind {
+  BRAND
+  PODCAST
+  PERSON
+  MOVIE
+  TV_SHOW
+  ARTIST
+  DESTINATION
+  PLACE
+  BOOK
+  VIDEOGAME
+  TAG
+}
+
+enum EvidenceStatus {
+  OK
+  WARNING
+  FAILED
+}
+
+enum MapStatus {
+  QUEUED
+  BUILDING
+  READY
+  FAILED
+}
+
+enum SubjectRole {
+  SELF
+  SEED
+  RIVAL
+}
+
+enum Tier {
+  MAINSTREAM
+  NICHE
+}
+
+enum Territory {
+  YOURS
+  CONTESTED
+  THEIRS
+}
+
+enum GeoKind {
+  DESTINATION
+  CITY
+  HEATMAP
+}
+
+enum PlayKind {
+  CREATOR
+  PODCAST
+  SHOW
+  ARTIST
+  PLACE
+  AESTHETIC
+  PARTNER
+  PRICE
+  SOUND
+}
+
+enum PlayStatus {
+  SUGGESTED
+  PINNED
+  DISMISSED
+}
+
+enum BriefStatus {
+  DRAFT
+  SHARED
+  EXPORTED
+  ARCHIVED
+}
+
+enum ClaimState {
+  CITED
+  UNCITED
+  REJECTED
+  TAINTED
+  INSIGHT_ONLY
+}
+
+enum AdSource {
+  DRAFT
+  COMPETITOR
+}
+
+enum AdStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ElementKind {
+  SETTING
+  STYLING
+  SCRIPT
+  ONSCREEN_TEXT
+  SOUND
+  CREATOR
+  REFERENCE
+  LOGO
+}
+
+enum RightsFlag {
+  NONE
+  COMMERCIAL_TRACK
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  CRITIC
+  TOOL
+}
+
+enum NotificationKind {
+  MAP_READY
+  MAP_AGEING
+  CRITIC_FLAG
+  SCAN_DONE
+  CONNECTION_REQUEST
+  CONNECTION_CHANGED
+  CLAIM_PENDING
+  BILLING
+}
+
+enum PinTarget {
+  MAP
+  TERRITORY_ITEM
+  PLAY
+  BRIEF
+  AD_CHECK
+}
+
+enum Theme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum Density {
+  COMFORTABLE
+  COMPACT
+}
+
+model User {
+  id                 String           @id
+  name               String
+  email              String
+  emailVerified      Boolean          @default(false)
+  image              String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  sessions           Session[]
+  accounts           Account[]
+  memberships        Member[]
+  invitationsSent    Invitation[]
+  preference         UserPreference?
+  connectionsAsked   Connection[]     @relation("ConnectionRequester")
+  connectionsDecided Connection[]     @relation("ConnectionDecider")
+  claimsMade         WorkspaceClaim[] @relation("ClaimCreator")
+  claimsAccepted     WorkspaceClaim[] @relation("ClaimAcceptor")
+  mapsCreated        CultureMap[]
+  briefsWritten      Brief[]
+  adsUploaded        Ad[]
+  threads            AskThread[]
+  notifications      Notification[]
+  pins               Pin[]
+  auditEvents        AuditEvent[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id                   String   @id
+  expiresAt            DateTime
+  token                String
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  ipAddress            String?
+  userAgent            String?
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeOrganizationId String?
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+model UserPreference {
+  userId             String   @id
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  theme              Theme    @default(SYSTEM)
+  density            Density  @default(COMFORTABLE)
+  reduceMotion       Boolean  @default(false)
+  showEvidenceInline Boolean  @default(true)
+  locale             String   @default("en-US")
+  region             String   @default("US")
+  defaultMarket      Market   @default(US)
+  updatedAt          DateTime @updatedAt
+
+  @@map("user_preference")
+}
+
+model Organization {
+  id                String           @id
+  kind              OrgKind
+  name              String
+  slug              String
+  logo              String?
+  metadata          String?
+  hqCountry         String?
+  teamSize          String?
+  billingEmail      String?
+  markets           Market[]
+  joinDomain        String?
+  joinRole          String?
+  connectCode       String?
+  brandEntityId     String?
+  brandEntity       QlooEntity?      @relation(fields: [brandEntityId], references: [id], onDelete: SetNull)
+  custodianId       String?
+  custodian         Organization?    @relation("Custody", fields: [custodianId], references: [id], onDelete: SetNull)
+  heldInTrust       Organization[]   @relation("Custody")
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  members           Member[]
+  invitations       Invitation[]
+  clientConnections Connection[]     @relation("AgencySide")
+  agencyConnections Connection[]     @relation("WorkspaceSide")
+  claims            WorkspaceClaim[] @relation("ClaimWorkspace")
+  claimsIssued      WorkspaceClaim[] @relation("ClaimAgency")
+  subscription      Subscription?    @relation("SubscriptionOwner")
+  subscriptionsPaid Subscription[]   @relation("SubscriptionPayer")
+  usagePaid         UsageLedger[]    @relation("UsagePayer")
+  usage             UsageLedger[]    @relation("UsageWorkspace")
+  maps              CultureMap[]
+  briefs            Brief[]          @relation("BriefWorkspace")
+  briefsAuthored    Brief[]          @relation("BriefAuthorOrg")
+  ads               Ad[]
+  threads           AskThread[]
+  notifications     Notification[]
+  pins              Pin[]
+  auditEvents       AuditEvent[]
+
+  @@unique([slug])
+  @@unique([connectCode])
+  @@index([kind])
+  @@index([custodianId])
+  @@map("organization")
+}
+
+model Member {
+  id             String               @id
+  organizationId String
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           String               @default("member")
+  allClients     Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  clientAccess   MemberClientAccess[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("member")
+}
+
+model Invitation {
+  id             String                   @id
+  organizationId String
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  role           String?
+  status         String                   @default("pending")
+  allClients     Boolean                  @default(true)
+  expiresAt      DateTime
+  createdAt      DateTime                 @default(now())
+  inviterId      String
+  user           User                     @relation(fields: [inviterId], references: [id], onDelete: Cascade)
+  clientAccess   InvitationClientAccess[]
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("invitation")
+}
+
+model Connection {
+  id               String                   @id @default(cuid())
+  agencyId         String
+  agency           Organization             @relation("AgencySide", fields: [agencyId], references: [id], onDelete: Cascade)
+  workspaceId      String
+  workspace        Organization             @relation("WorkspaceSide", fields: [workspaceId], references: [id], onDelete: Cascade)
+  status           ConnectionStatus         @default(REQUESTED)
+  origin           ConnectionOrigin
+  accessRequested  AccessLevel
+  access           AccessLevel?
+  requestedById    String?
+  requestedBy      User?                    @relation("ConnectionRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  decidedById      String?
+  decidedBy        User?                    @relation("ConnectionDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+  requestedAt      DateTime                 @default(now())
+  decidedAt        DateTime?
+  endedAt          DateTime?
+  endedBy          EndedBy?
+  endReason        String?
+  agencyKeepsPdf   Boolean                  @default(false)
+  updatedAt        DateTime                 @updatedAt
+  memberAccess     MemberClientAccess[]
+  invitationAccess InvitationClientAccess[]
+
+  @@unique([agencyId, workspaceId])
+  @@index([workspaceId, status])
+  @@map("connection")
+}
+
+model MemberClientAccess {
+  memberId     String
+  member       Member     @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  connectionId String
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@id([memberId, connectionId])
+  @@index([connectionId])
+  @@map("member_client_access")
+}
+
+model InvitationClientAccess {
+  invitationId String
+  invitation   Invitation @relation(fields: [invitationId], references: [id], onDelete: Cascade)
+  connectionId String
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@id([invitationId, connectionId])
+  @@map("invitation_client_access")
+}
+
+model WorkspaceClaim {
+  id              String       @id @default(cuid())
+  workspaceId     String
+  workspace       Organization @relation("ClaimWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  agencyId        String
+  agency          Organization @relation("ClaimAgency", fields: [agencyId], references: [id], onDelete: Cascade)
+  email           String
+  tokenHash       String
+  requestedAccess AccessLevel
+  status          ClaimStatus  @default(PENDING)
+  expiresAt       DateTime
+  createdById     String?
+  createdBy       User?        @relation("ClaimCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  claimedById     String?
+  claimedBy       User?        @relation("ClaimAcceptor", fields: [claimedById], references: [id], onDelete: SetNull)
+  claimedAt       DateTime?
+  createdAt       DateTime     @default(now())
+
+  @@unique([tokenHash])
+  @@index([workspaceId, status])
+  @@index([email])
+  @@map("workspace_claim")
+}
+
+model Subscription {
+  id                     String             @id @default(cuid())
+  organizationId         String
+  organization           Organization       @relation("SubscriptionOwner", fields: [organizationId], references: [id], onDelete: Cascade)
+  payerId                String
+  payer                  Organization       @relation("SubscriptionPayer", fields: [payerId], references: [id], onDelete: Restrict)
+  plan                   Plan               @default(FREE)
+  status                 SubscriptionStatus @default(ACTIVE)
+  seats                  Int                @default(1)
+  monthlyQueryAllowance  Int                @default(1000)
+  currentPeriodEnd       DateTime?
+  graceEndsAt            DateTime?
+  externalCustomerId     String?
+  externalSubscriptionId String?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  @@unique([organizationId])
+  @@unique([externalSubscriptionId])
+  @@index([payerId])
+  @@map("subscription")
+}
+
+model UsageLedger {
+  id          String       @id @default(cuid())
+  payerId     String
+  payer       Organization @relation("UsagePayer", fields: [payerId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Organization @relation("UsageWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  mapId       String?
+  map         CultureMap?  @relation(fields: [mapId], references: [id], onDelete: SetNull)
+  kind        UsageKind
+  calls       Int
+  cacheHits   Int          @default(0)
+  createdAt   DateTime     @default(now())
+
+  @@index([payerId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@map("usage_ledger")
+}
+
+model QlooEntity {
+  id             String          @id
+  kind           EntityKind
+  name           String
+  subtype        String?
+  popularity     Float?
+  imageUrl       String?
+  externalIds    Json?
+  properties     Json?
+  fetchedAt      DateTime        @default(now())
+  workspaces     Organization[]
+  mapSubjects    MapSubject[]
+  associations   Association[]
+  territoryItems TerritoryItem[]
+  geoSignals     GeoSignal[]
+  plays          Play[]
+  adElements     AdElement[]
+  competitorAds  Ad[]
+
+  @@index([kind, name])
+  @@map("qloo_entity")
+}
+
+model QlooCache {
+  key        String     @id
+  path       String
+  params     Json
+  response   Json
+  httpStatus Int
+  fetchedAt  DateTime   @default(now())
+  expiresAt  DateTime?
+  evidence   Evidence[]
+
+  @@index([path])
+  @@map("qloo_cache")
+}
+
+model Evidence {
+  id                String          @id @default(cuid())
+  method            String          @default("GET")
+  path              String
+  params            Json
+  cacheKey          String?
+  cache             QlooCache?      @relation(fields: [cacheKey], references: [key], onDelete: SetNull)
+  status            EvidenceStatus  @default(OK)
+  warnings          Json?
+  placeholderMasked Boolean         @default(false)
+  durationMs        Int?
+  createdAt         DateTime        @default(now())
+  associations      Association[]
+  territoryItems    TerritoryItem[]
+  audienceIndexes   AudienceIndex[]
+  geoSignals        GeoSignal[]
+  readings          MapReading[]
+  plays             Play[]
+  briefItems        BriefItem[]
+
+  @@index([cacheKey])
+  @@map("evidence")
+}
+
+model CultureMap {
+  id              String          @id @default(cuid())
+  workspaceId     String
+  workspace       Organization    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name            String?
+  market          Market
+  status          MapStatus       @default(QUEUED)
+  thinData        Boolean         @default(false)
+  categoriesDone  Int             @default(0)
+  categoriesTotal Int             @default(8)
+  queryCount      Int             @default(0)
+  builtAt         DateTime?
+  createdById     String?
+  createdBy       User?           @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  subjects        MapSubject[]
+  associations    Association[]
+  territoryItems  TerritoryItem[]
+  audienceIndexes AudienceIndex[]
+  geoSignals      GeoSignal[]
+  readings        MapReading[]
+  plays           Play[]
+  briefs          Brief[]
+  ads             Ad[]
+  adChecks        AdCheck[]
+  threads         AskThread[]
+  usage           UsageLedger[]
+
+  @@index([workspaceId, createdAt])
+  @@map("culture_map")
+}
+
+model MapSubject {
+  id              String          @id @default(cuid())
+  mapId           String
+  map             CultureMap      @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  entityId        String
+  entity          QlooEntity      @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  role            SubjectRole
+  position        Int             @default(0)
+  associations    Association[]
+  audienceIndexes AudienceIndex[]
+  geoSignals      GeoSignal[]
+  rivalItems      TerritoryItem[]
+
+  @@unique([mapId, entityId])
+  @@map("map_subject")
+}
+
+model Association {
+  id         String     @id @default(cuid())
+  mapId      String
+  map        CultureMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  subjectId  String
+  subject    MapSubject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  entityId   String
+  entity     QlooEntity @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  category   EntityKind
+  tier       Tier       @default(MAINSTREAM)
+  segment    String     @default("")
+  city       String     @default("")
+  rank       Int
+  affinity   Float
+  evidenceId String
+  evidence   Evidence   @relation(fields: [evidenceId], references: [id], onDelete: Restrict)
+
+  @@unique([subjectId, entityId, category, tier, segment, city])
+  @@index([mapId, category, segment, city])
+  @@map("association")
+}
+
+model TerritoryItem {
+  id             String      @id @default(cuid())
+  mapId          String
+  map            CultureMap  @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  entityId       String
+  entity         QlooEntity  @relation(fields: [entityId], references: [id], onDelete: Restrict)
+  category       EntityKind
+  segment        String      @default("")
+  city           String      @default("")
+  tier           Tier        @default(MAINSTREAM)
+  label          Territory
+  leanSelf       Float?
+  rivalSubjectId String?
+  rivalSubject   MapSubject? @relation(fields: [rivalSubjectId], references: [id], onDelete: SetNull)
+  evidenceId     String?
+  evidence       Evidence?   @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+
+  @@unique([mapId, entityId, category, tier, segment, city])
+  @@index([mapId, category, label])
+  @@map("territory_item")
+}
+
+model AudienceIndex {
+  id                String     @id @default(cuid())
+  mapId             String
+  map               CultureMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  subjectId         String
+  subject           MapSubject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  audience          String
+  value             Float?
+  lowConfidence     Boolean    @default(false)
+  placeholderMasked Boolean    @default(false)
+  insightOnly       Boolean    @default(false)
+  evidenceId        String
+  evidence          Evidence   @relation(fields: [evidenceId], references: [id], onDelete: Restrict)
+
+  @@unique([subjectId, audience])
+  @@index([mapId])
+  @@map("audience_index")
+}
+
+model GeoSignal {
+  id         String      @id @default(cuid())
+  mapId      String
+  map        CultureMap  @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  subjectId  String
+  subject    MapSubject  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  kind       GeoKind
+  entityId   String?
+  entity     QlooEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  label      String
+  value      Float?
+  rank       Int?
+  payload    Json?
+  evidenceId String
+  evidence   Evidence    @relation(fields: [evidenceId], references: [id], onDelete: Restrict)
+
+  @@index([mapId, kind])
+  @@map("geo_signal")
+}
+
+model MapReading {
+  id        String      @id @default(cuid())
+  mapId     String
+  map       CultureMap  @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  category  EntityKind?
+  text      String
+  createdAt DateTime    @default(now())
+  evidence  Evidence[]
+
+  @@index([mapId])
+  @@map("map_reading")
+}
+
+model Play {
+  id         String      @id @default(cuid())
+  mapId      String
+  map        CultureMap  @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  kind       PlayKind
+  title      String
+  rationale  String
+  rank       Int
+  entityId   String?
+  entity     QlooEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  status     PlayStatus  @default(SUGGESTED)
+  createdAt  DateTime    @default(now())
+  evidence   Evidence[]
+  briefItems BriefItem[]
+
+  @@index([mapId, kind, rank])
+  @@map("play")
+}
+
+model Brief {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Organization  @relation("BriefWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  mapId       String?
+  map         CultureMap?   @relation(fields: [mapId], references: [id], onDelete: SetNull)
+  title       String
+  subtitle    String?
+  segment     String?
+  cities      String[]
+  market      Market
+  status      BriefStatus   @default(DRAFT)
+  authorId    String?
+  author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorOrgId String?
+  authorOrg   Organization? @relation("BriefAuthorOrg", fields: [authorOrgId], references: [id], onDelete: SetNull)
+  shareToken  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  items       BriefItem[]
+  threads     AskThread[]
+
+  @@unique([shareToken])
+  @@index([workspaceId, updatedAt])
+  @@map("brief")
+}
+
+model BriefItem {
+  id         String     @id @default(cuid())
+  briefId    String
+  brief      Brief      @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  section    String
+  kind       PlayKind?
+  text       String
+  position   Int
+  playId     String?
+  play       Play?      @relation(fields: [playId], references: [id], onDelete: SetNull)
+  state      ClaimState @default(UNCITED)
+  criticNote String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  evidence   Evidence[]
+
+  @@index([briefId, position])
+  @@map("brief_item")
+}
+
+model Ad {
+  id                 String       @id @default(cuid())
+  workspaceId        String
+  workspace          Organization @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mapId              String?
+  map                CultureMap?  @relation(fields: [mapId], references: [id], onDelete: SetNull)
+  title              String
+  source             AdSource     @default(DRAFT)
+  competitorEntityId String?
+  competitorEntity   QlooEntity?  @relation(fields: [competitorEntityId], references: [id], onDelete: SetNull)
+  storageKey         String
+  durationMs         Int?
+  status             AdStatus     @default(UPLOADED)
+  uploadedById       String?
+  uploadedBy         User?        @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt          DateTime     @default(now())
+  elements           AdElement[]
+  checks             AdCheck[]
+
+  @@index([workspaceId, createdAt])
+  @@map("ad")
+}
+
+model AdElement {
+  id         String      @id @default(cuid())
+  adId       String
+  ad         Ad          @relation(fields: [adId], references: [id], onDelete: Cascade)
+  kind       ElementKind
+  raw        String
+  startMs    Int
+  endMs      Int
+  salience   Float
+  confidence Float
+  entityId   String?
+  entity     QlooEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  tagId      String?
+  territory  Territory?
+  offMap     Boolean     @default(false)
+
+  @@index([adId, kind])
+  @@map("ad_element")
+}
+
+model AdCheck {
+  id           String     @id @default(cuid())
+  adId         String
+  ad           Ad         @relation(fields: [adId], references: [id], onDelete: Cascade)
+  mapId        String
+  map          CultureMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  yoursPct     Float
+  contestedPct Float
+  theirsPct    Float
+  offMapPct    Float
+  rightsFlag   RightsFlag @default(NONE)
+  rightsDetail String?
+  blame        Json
+  fixes        Json
+  createdAt    DateTime   @default(now())
+
+  @@index([adId])
+  @@map("ad_check")
+}
+
+model AskThread {
+  id          String       @id @default(cuid())
+  workspaceId String
+  workspace   Organization @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mapId       String?
+  map         CultureMap?  @relation(fields: [mapId], references: [id], onDelete: SetNull)
+  briefId     String?
+  brief       Brief?       @relation(fields: [briefId], references: [id], onDelete: SetNull)
+  title       String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  messages    AskMessage[]
+
+  @@index([workspaceId, userId, updatedAt])
+  @@map("ask_thread")
+}
+
+model AskMessage {
+  id        String      @id @default(cuid())
+  threadId  String
+  thread    AskThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role      MessageRole
+  parts     Json
+  createdAt DateTime    @default(now())
+
+  @@index([threadId, createdAt])
+  @@map("ask_message")
+}
+
+model Notification {
+  id             String           @id @default(cuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  kind           NotificationKind
+  title          String
+  body           String?
+  targetType     String?
+  targetId       String?
+  readAt         DateTime?
+  createdAt      DateTime         @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@map("notification")
+}
+
+model Pin {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  targetType     PinTarget
+  targetId       String
+  label          String
+  createdAt      DateTime     @default(now())
+
+  @@unique([userId, targetType, targetId])
+  @@index([organizationId])
+  @@map("pin")
+}
+
+model AuditEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorId        String?
+  actor          User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action         String
+  targetType     String
+  targetId       String
+  data           Json?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@map("audit_event")
+}
