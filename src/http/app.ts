@@ -11,6 +11,7 @@ import { auth } from "@/modules/auth/auth";
 import { healthRouter } from "@/modules/health/health.routes";
 import { meRouter } from "@/modules/me/me.routes";
 import { opsRouter } from "@/modules/ops/ops.routes";
+import { orgsRouter } from "@/modules/orgs/orgs.routes";
 
 export function createApp(): Express {
   const app = express();
@@ -32,7 +33,7 @@ export function createApp(): Express {
   app.all("/api/auth/*splat", toNodeHandler(auth));
 
   app.use(express.json({ limit: "1mb" }));
-  app.use("/api/v1", createApiRateLimit(), meRouter);
+  app.use("/api/v1", createApiRateLimit(), meRouter, orgsRouter);
   app.use("/api/v1/ops", opsRouter);
 
   app.use(notFound);
