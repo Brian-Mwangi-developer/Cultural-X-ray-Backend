@@ -125,12 +125,17 @@ const noteHtml = (note: string) =>
     ? `<a href="mailto:${escape(note)}" class="x-muted" style="color:${MUTED};text-decoration:none">${escape(note)}</a>`
     : escape(note);
 
+const valueHtml = (value: string) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+    ? `<a href="mailto:${escape(value)}" class="x-ink" style="color:${INK};text-decoration:none">${escape(value)}</a>`
+    : escape(value);
+
 function detailRows(rows: Row[]): string {
   const cells = rows
     .map(
       (row, i) => `<tr>
   <td class="x-rule" style="padding:12px 18px;${i ? `border-top:1px solid ${BORDER};` : ""}font-size:13px;line-height:18px;color:${MUTED};width:118px;vertical-align:top">${escape(row.label)}</td>
-  <td class="x-rule" style="padding:12px 18px 12px 0;${i ? `border-top:1px solid ${BORDER};` : ""}font-size:14px;line-height:20px;color:${INK};vertical-align:top"><span class="x-ink" style="font-weight:600;color:${INK}">${escape(row.value)}</span>${row.note ? `<br><span class="x-muted" style="font-size:13px;color:${MUTED}">${noteHtml(row.note)}</span>` : ""}</td>
+  <td class="x-rule" style="padding:12px 18px 12px 0;${i ? `border-top:1px solid ${BORDER};` : ""}font-size:14px;line-height:20px;color:${INK};vertical-align:top"><span class="x-ink" style="font-weight:600;color:${INK}">${valueHtml(row.value)}</span>${row.note ? `<br><span class="x-muted" style="font-size:13px;color:${MUTED}">${noteHtml(row.note)}</span>` : ""}</td>
 </tr>`,
     )
     .join("");

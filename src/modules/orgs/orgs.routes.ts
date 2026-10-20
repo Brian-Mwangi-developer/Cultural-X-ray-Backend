@@ -34,7 +34,7 @@ orgsRouter.get("/orgs/:slug", requireAuth, async (req, res, next) => {
       where: { id: organization.id },
       select: {
         id: true, kind: true, name: true, slug: true, logo: true, hqCountry: true, teamSize: true, billingEmail: true,
-        markets: true, joinDomain: true, joinRole: true, connectCode: true, createdAt: true,
+        markets: true, joinDomain: true, joinRole: true, connectCode: true, metadata: true, createdAt: true,
         custodian: { select: { id: true, name: true, slug: true } },
         _count: { select: { members: true } },
       },
