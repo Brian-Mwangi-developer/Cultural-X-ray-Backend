@@ -114,6 +114,16 @@ export const auth = betterAuth({
             throw new APIError("BAD_REQUEST", { code: "XRAY_KIND_FIXED", message: "An agency can't become a workspace, or the other way round." });
           }
         },
+        beforeDeleteOrganization: async ({ organization: org }) => {
+          if ((org as { kind?: string }).kind !== "AGENCY") return;
+          const waiting = await prisma.workspaceClaim.count({ where: { agencyId: org.id, status: "PENDING", expiresAt: { gt: new Date() } } });
+          if (waiting > 0) {
+            throw new APIError("BAD_REQUEST", {
+              code: "XRAY_UNCLAIMED_CLIENTS",
+              message: `${waiting === 1 ? "A client workspace is" : `${waiting} client workspaces are`} still waiting to be claimed. Deleting now would leave ${waiting === 1 ? "it" : "them"} without an owner, so ask ${waiting === 1 ? "its owner" : "their owners"} to claim first.`,
+            });
+          }
+        },
         beforeCreateInvitation: async ({ invitation }) => {
           if (!INVITABLE_ROLES.includes(invitation.role as (typeof INVITABLE_ROLES)[number])) {
             throw new APIError("BAD_REQUEST", { code: "XRAY_INVALID_ROLE", message: "Invite people as Admin, Strategist or Viewer." });
