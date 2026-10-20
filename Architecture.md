@@ -164,20 +164,48 @@ Ad checks and map builds will follow exactly this pattern.
 ## 7. Authentication and tenancy
 
 - **Better Auth** (`src/modules/auth/auth.ts`), mounted at `/api/auth/*`.
-  - Email and password plus Google. Email verification and password resets are sent through the email queue.
+  - Email and password plus Google. **No session until the email is confirmed**: sign-up sends a 24-hour confirmation link, and the link signs you in and lands on its `callbackURL` (onboarding, an invite or a claim). Signing in unconfirmed resends the link.
+  - Password reset links last one hour and sign out every other session.
   - Sessions are stored in Postgres and cached in Redis (`session-store.ts`). If Redis fails, reads fall back to Postgres and sign-in keeps working.
   - Auth rate limits use Redis counters (sign-in 10/min, sign-up 5/min, password reset 5 per 5 min).
-- **Organization plugin**: agencies and workspaces are both `organization` rows with `kind = AGENCY | WORKSPACE`. Members and invitations come from the plugin. `connection` links an agency to a workspace at `VIEW | EDIT | MANAGE`.
+- **Organizations**: agencies and brand workspaces are both `organization` rows with `kind = AGENCY | WORKSPACE`. Members and invitations come from the plugin.
+  - Roles (`roles.ts`, mirrored in `web/src/lib/roles.ts`): `owner`, `admin`, `strategist`, `viewer`. People are invited as admin, strategist or viewer; ownership moves only by transfer.
+  - Hooks enforce: a valid kind, workspace URLs that never shadow app routes (`orgs/slugs.ts`), a connect code for every workspace (`orgs/connect-code.ts`), and no deleting an agency while a client workspace still waits for its owner.
+  - Join by domain: an owner or admin can let anyone with a confirmed address at **their own** company domain join as Viewer. Public mailbox domains (gmail.com and similar) are refused.
+- **Connections** (`modules/connections`): the only bridge between an agency and a brand.
+  - *Created in trust*: an agency sets up a workspace for a client (`POST /orgs/:id/clients`). The workspace's `custodianId` is the agency, the connection is ACTIVE, and a `workspace_claim` (token hashed, 14 days) is emailed to the client owner.
+  - *Claimed*: the owner signs in with that exact, confirmed address and claims (`POST /claims/:token/accept`), choosing the agency's access. They become `owner`; custody ends.
+  - *Connected by code*: an agency enters a workspace's code (`POST /orgs/:id/connections`) → REQUESTED; the brand's owners and admins are emailed and approve or decline, and can lower the access first.
+  - Either side can end it (`POST /connections/:id/end`). The workspace and everything in it always stays with the brand; an unclaimed workspace stays claimable.
+  - Every change writes an `audit_event` (`orgs/audit.ts`). Non-members get 404, never 403, so ids and slugs don't leak.
 - `BETTER_AUTH_URL` is the **web app's** origin, because browsers reach auth through the web app's `/api` proxy. Cookies stay first-party and the Google OAuth redirect URI is unchanged.
-- Protected routes use `requireAuth` and read the session with `sessionOf(req)`. `GET /api/v1/me` returns the user and their memberships.
+- Protected routes use `requireAuth` and read the session with `sessionOf(req)`.
+
+| Endpoint | What it's for |
+|---|---|
+| `GET /api/v1/me`, `PUT /api/v1/me/preferences` | The user, memberships, appearance preferences (saved to the profile) |
+| `GET /api/v1/slugs/:slug` | Is a workspace URL free, and why not |
+| `GET /api/v1/orgs/:slug`, `PATCH /api/v1/orgs/:id/profile` | Org context for members; markets, join-by-domain |
+| `GET /api/v1/me/joinable`, `POST /api/v1/orgs/:id/join` | Teams matching your confirmed email domain |
+| `GET /api/v1/invitations/:id/preview` | Public invite summary for the invite page |
+| `GET/POST /api/v1/orgs/:id/clients`, `POST /api/v1/orgs/:id/connections`, `GET /api/v1/orgs/:id/agencies` | Agency clients and brand agencies |
+| `POST /api/v1/connections/:id/decide`, `PATCH …/access`, `POST …/end` | The brand's decisions; ending from either side |
+| `GET /api/v1/claims/:token`, `POST …/accept`, `POST …/decline` | Claiming a workspace held in trust |
+| `POST /api/v1/orgs/:id/connect-code` | A new workspace code (the old one stops working) |
+| `POST /api/v1/me/feedback` | "Report an issue"; logged with a reference until a support tool takes it |
+
+**Errors:** `HttpError` carries a stable `code`. 4xx messages are written for people and the web shows them as written; Better Auth hook errors use `XRAY_*` codes for the same reason. 5xx responses carry only a reference.
 
 ---
 
 ## 8. Email
 
 - Producer: `enqueueEmail(job)` in `modules/email/email.queue.ts`. Templates and their zod schemas live in `email.templates.ts`; all user values are HTML-escaped.
-- Transport: `EMAIL_PROVIDER=ses` sends through Amazon SES (us-east-1) from `EMAIL_FROM`; `log` writes the email to the log instead (use it when you don't want real mail).
-- SES errors that retrying cannot fix (`MessageRejected`, unverified sender, suspended account) become `PermanentError` → dead letter. Throttling and network errors are retried.
+- Templates: `verify-email` (copy changes with where the link lands), `reset-password`, `organization-invite` (role and what it can do), `workspace-claim`, `connection-request`, `connection-ended`, `plain`.
+- Design: one layout for all of them. A wordmark bar, a photo band (Unsplash, hotlinked at 1120×360; security emails have none), an ember eyebrow, a detail card, a table-cell pill button with a fallback link, a security note, dark-mode overrides, and a plain-text twin. Addresses are rendered as styled `mailto:` links so mail apps don't paint them blue.
+- Review a template in a real inbox: `POST /api/v1/ops/email/test` with `{ "to": "...", "template": "workspace-claim" }` sends it with sample data (`email.samples.ts`).
+- Transport: `EMAIL_PROVIDER=ses` sends through Amazon SES (us-east-1) from `EMAIL_FROM` (display name "Cultural X-Ray"); `log` writes the email to the log instead (use it when you don't want real mail).
+- SES errors that retrying cannot fix (`MessageRejected`, unverified sender, suspended account) become `PermanentError` → dead letter. Throttling and network errors are retried. Notification emails after a change are best-effort: a queue failure is logged, and never undoes the change.
 - Addresses on reserved test domains (`.test`, `.example`, `.invalid`, `.localhost`, `example.com/net/org`) are skipped, never sent, to protect sender reputation.
 - Read-only health check: `pnpm ses:verify` (sender verified, DKIM, quota, credential source).
 
@@ -245,8 +273,16 @@ Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus
 | Zod schema per handler, `PermanentError` | Bad data goes straight to dead letters instead of being retried pointlessly |
 | Agencies and workspaces are both organizations | Reuses Better Auth's members and invitations; the connection table is the only bridge |
 | App-specific AWS keys locally, IAM role in production | No static keys in production; no accidental use of another app's identity |
+| The brand always owns its workspace; agencies connect | A client can leave an agency without losing anything; access is the brand's to grant |
+| Agency-created workspaces are held in trust, then claimed | Agencies can start work before the client signs up, without ever owning the client's data |
+| Confirm email before any session | Invites, claims and join-by-domain all trust the address, so it must be proven first |
+
+Done:
+- The web app's auth and session reads moved here. The web proxies `/api/auth/*` and `/api/v1/*` (except `/api/v1/ops/*`) to this backend and holds no database or auth secrets.
 
 Open:
-- Move the web app's auth and session reads to this backend (planned next, awaiting the go-ahead).
-- This app's own sending domain (today it sends as `platform.learnitpal.com`).
+- This app's own sending domain (today it sends as `platform.learnitpal.com`), and hosting email images on it instead of Unsplash.
+- Per-client access for agency members (`member_client_access`): the tables exist and the clients list honours them, but there's no UI to narrow a member to some clients yet.
+- Billing, Qloo usage metering, maps, briefs and ad checks: the web shows sample data for these until the engine lands.
+- Connection writes make several sequential round trips to Neon (about 7 s from Nairobi). Batch them or move the database closer before launch.
 - Alert delivery (Alertmanager, Slack or email) and production deployment target.
