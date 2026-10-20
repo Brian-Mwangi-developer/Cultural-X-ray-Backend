@@ -1,7 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@/infra/database";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
+import { logger } from "@/observability/logger";
 
 export const meRouter = Router();
 
@@ -77,6 +79,25 @@ meRouter.put("/me/preferences", requireAuth, async (req, res, next) => {
       select: preferenceSelect,
     });
     res.json({ preferences });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const feedbackSchema = z.object({
+  message: z.string().trim().min(5, "Tell us a little more, so we can find it.").max(4000, "Keep it under 4,000 characters."),
+  page: z.string().max(300).optional(),
+  organizationId: z.string().max(64).optional(),
+});
+
+/** "Report an issue" from the profile menu. Logged with a reference until a support tool takes it. */
+meRouter.post("/me/feedback", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const input = feedbackSchema.parse(req.body);
+    const reference = `FB-${randomBytes(3).toString("hex").toUpperCase()}`;
+    logger.warn({ reference, userId: user.id, page: input.page, organizationId: input.organizationId, message: input.message }, "user reported an issue");
+    res.status(202).json({ reference });
   } catch (error) {
     next(error);
   }

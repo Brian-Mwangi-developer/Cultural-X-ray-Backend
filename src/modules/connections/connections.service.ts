@@ -170,6 +170,15 @@ export async function requestConnection(actor: Actor, agencyId: string, input: {
 
 /* ----------------------------------------------------------------- lists */
 
+function rivalsOf(metadata: string | null): string[] {
+  try {
+    const rivals = (JSON.parse(metadata ?? "{}") as { rivals?: unknown }).rivals;
+    return Array.isArray(rivals) ? rivals.filter((r): r is string => typeof r === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function listClients(actor: Actor, agencyId: string) {
   const { organization, member } = await membershipOf(actor.id, { id: agencyId });
   if (organization.kind !== "AGENCY") throw new HttpError(400, "Only agencies have clients.", { code: "NOT_AN_AGENCY" });
@@ -182,7 +191,7 @@ export async function listClients(actor: Actor, agencyId: string) {
       id: true, status: true, origin: true, access: true, accessRequested: true, requestedAt: true,
       workspace: {
         select: {
-          id: true, name: true, slug: true, custodianId: true, markets: true,
+          id: true, name: true, slug: true, custodianId: true, markets: true, metadata: true,
           members: { where: { role: "owner" }, select: { user: { select: { name: true, email: true } } }, take: 1 },
           claims: { where: { agencyId }, orderBy: { createdAt: "desc" }, take: 1, select: { email: true, status: true, expiresAt: true } },
         },
@@ -203,7 +212,7 @@ export async function listClients(actor: Actor, agencyId: string) {
       access: c.access,
       accessRequested: c.accessRequested,
       requestedAt: c.requestedAt,
-      workspace: { id: c.workspace.id, name: c.workspace.name, slug: c.workspace.slug, markets: c.workspace.markets },
+      workspace: { id: c.workspace.id, name: c.workspace.name, slug: c.workspace.slug, markets: c.workspace.markets, rivals: rivalsOf(c.workspace.metadata) },
       owner: owner ? { name: owner.name, email: owner.email } : null,
       claim: claim && !owner ? { email: claim.email, status: claim.status, expired: claim.expiresAt < new Date(), expiresAt: claim.expiresAt } : null,
       heldInTrust,
