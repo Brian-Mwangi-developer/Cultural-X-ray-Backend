@@ -1,0 +1,52 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: xray
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # API and worker run on the host in dev and in containers with the app profile;
+  # both publish to the host, so host.docker.internal reaches them either way.
+  - job_name: xray-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      - targets: ["host.docker.internal:4000"]
+        labels: { role: api }
+
+  - job_name: xray-worker
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      - targets: ["host.docker.internal:4001"]
+        labels: { role: worker }
+
+  # RabbitMQ's built-in exporter: broker-wide totals.
+  - job_name: rabbitmq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # Per-queue depth and consumer counts, including the dead-letter queue.
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      vhost: ["xray"]
+      family: ["queue_coarse_metrics", "queue_consumer_count"]
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]

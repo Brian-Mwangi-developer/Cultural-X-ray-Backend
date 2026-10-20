@@ -1,0 +1,69 @@
+groups:
+  - name: xray-queues
+    rules:
+      - alert: DeadLettersWaiting
+        expr: max(rabbitmq_detailed_queue_messages_ready{queue="xray.dead_letters"}) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} message(s) in xray.dead_letters"
+          description: "Jobs failed permanently. Inspect GET /api/v1/ops/dead-letters, fix the cause, then replay."
+
+      - alert: DeadLetterSpike
+        expr: sum(increase(xray_mq_dead_letter_total[10m])) > 10
+        labels: { severity: critical }
+        annotations:
+          summary: "More than 10 messages dead-lettered in 10 minutes"
+
+      - alert: OutboxBacklog
+        expr: max(xray_mq_outbox_depth) > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Publishes are parked in the Redis outbox"
+          description: "RabbitMQ is not accepting publishes; the drain loop will replay them once it recovers."
+
+      - alert: QueueBacklog
+        expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~"xray\\.(email|map|ad)\\..*", queue!~".*\\.retry"}) > 1000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.queue }} has more than 1000 waiting messages"
+
+      - alert: QueueHasNoConsumers
+        expr: max by (queue) (rabbitmq_detailed_queue_consumers{queue=~"xray\\.(email\\.send|system\\.diagnostics)"}) == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.queue }} has no consumers: is the worker running?"
+
+  - name: xray-services
+    rules:
+      - alert: TargetDown
+        expr: up{job=~"xray-api|xray-worker|rabbitmq|redis"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is down"
+
+      - alert: DependencyUnreachable
+        expr: min by (job, dependency) (xray_dependency_up) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} cannot reach {{ $labels.dependency }}"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(xray_http_requests_total{status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(xray_http_requests_total[5m])), 1) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "More than 5% of API requests are failing"
+
+      - alert: RabbitMQMemoryAlarm
+        expr: max(rabbitmq_alarms_memory_used_watermark) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "RabbitMQ hit its memory watermark and is blocking publishers"

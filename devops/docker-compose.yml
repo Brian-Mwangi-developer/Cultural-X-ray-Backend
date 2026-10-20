@@ -1,0 +1,181 @@
+name: xray
+
+# Profiles keep concerns apart:
+#   infra       Redis + RabbitMQ (what the backend needs to run)
+#   monitoring  Prometheus + Grafana + Redis exporter (RabbitMQ exports its own metrics)
+#   app         the API and worker as containers (production-like; dev runs them on the host)
+# Host ports bind to 127.0.0.1 only and avoid the defaults used by other local stacks.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  redis:
+    profiles: [infra]
+    image: redis:7.4-alpine
+    container_name: xray-redis
+    restart: unless-stopped
+    command: >
+      sh -c 'exec redis-server
+      --requirepass "$$REDIS_PASSWORD"
+      --appendonly yes --appendfsync everysec
+      --maxmemory 512mb --maxmemory-policy noeviction'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run scripts/init-env.sh first}
+    ports: ["127.0.0.1:${REDIS_HOST_PORT:-6390}:6379"]
+    volumes: [redis_data:/data]
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    profiles: [infra]
+    image: rabbitmq:4.1-management-alpine
+    container_name: xray-rabbitmq
+    hostname: xray-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:?run scripts/init-env.sh first}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?run scripts/init-env.sh first}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-xray}
+    ports:
+      - "127.0.0.1:${RABBITMQ_HOST_PORT:-5682}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_HOST_PORT:-15682}:15672"
+      - "127.0.0.1:${RABBITMQ_METRICS_HOST_PORT:-15692}:15692"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-xray.conf:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v3.5.0
+    container_name: xray-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports: ["127.0.0.1:${PROMETHEUS_HOST_PORT:-9095}:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus/metrics_token:/etc/prometheus/metrics_token:ro
+      - prometheus_data:/prometheus
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:12.1.1
+    container_name: xray-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?run scripts/init-env.sh first}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/xray-backend.json
+    ports: ["127.0.0.1:${GRAFANA_HOST_PORT:-3005}:3000"]
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis-exporter:
+    profiles: [monitoring]
+    image: oliver006/redis_exporter:v1.74.0
+    container_name: xray-redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [xray]
+    logging: *logging
+
+  api:
+    profiles: [app]
+    build: { context: .., dockerfile: devops/Dockerfile }
+    image: xray-backend:local
+    container_name: xray-api
+    restart: unless-stopped
+    command: ["node", "dist/server.js"]
+    env_file: [../.env]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+    ports: ["127.0.0.1:4000:4000"]
+    depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    profiles: [app]
+    image: xray-backend:local
+    container_name: xray-worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file: [../.env]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+    ports: ["127.0.0.1:4001:4001"]
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  xray:
+    name: xray
