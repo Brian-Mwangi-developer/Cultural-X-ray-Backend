@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
+import { sampleEmail, SAMPLE_TEMPLATES } from "@/modules/email/email.samples";
 import { config } from "@/config/env";
 import { requireToken } from "@/http/middleware";
 import { peekDeadLetters, queueDepths, replayDeadLetters } from "@/messaging/dead-letters";
@@ -60,13 +61,18 @@ opsRouter.get("/email/ses", async (_req, res, next) => {
 
 opsRouter.post("/email/test", async (req, res, next) => {
   try {
-    const { to } = z.object({ to: z.email() }).parse(req.body ?? {});
-    const result = await enqueueEmail({
-      template: "plain",
-      to,
-      subject: "Cultural X-Ray email test",
-      text: "This is a test email from the Cultural X-Ray backend. If you can read it, SES delivery works.",
-    });
+    const { to, template } = z
+      .object({ to: z.email(), template: z.enum(SAMPLE_TEMPLATES).optional() })
+      .parse(req.body ?? {});
+    const job = template
+      ? sampleEmail(template, to)
+      : ({
+          template: "plain",
+          to,
+          subject: "Cultural X-Ray email test",
+          text: "This is a test email from the Cultural X-Ray backend. If you can read it, SES delivery works.",
+        } as const);
+    const result = await enqueueEmail(job);
     res.status(202).json(result);
   } catch (error) {
     next(error);

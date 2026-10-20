@@ -6,8 +6,10 @@ describe("email templates", () => {
     const jobs = [
       { template: "verify-email", to: "a@b.co", name: "Maya", url: "https://x.test/v" },
       { template: "reset-password", to: "a@b.co", name: "Maya", url: "https://x.test/r" },
-      { template: "organization-invite", to: "a@b.co", inviterName: "Tomás", organizationName: "Harbor & Pine", role: "strategist", url: "https://x.test/i" },
-      { template: "workspace-claim", to: "a@b.co", agencyName: "Harbor & Pine", workspaceName: "Starbucks", url: "https://x.test/c" },
+      { template: "organization-invite", to: "a@b.co", inviterName: "Tomás", inviterEmail: "t@h.co", organizationName: "Harbor & Pine", organizationKind: "AGENCY", role: "strategist", url: "https://x.test/i", expiresAt: "2026-10-27T10:00:00.000Z" },
+      { template: "workspace-claim", to: "a@b.co", agencyName: "Harbor & Pine", inviterName: "Tomás", workspaceName: "Starbucks", access: "MANAGE", url: "https://x.test/c", expiresAt: "2026-10-27T10:00:00.000Z" },
+      { template: "connection-request", to: "a@b.co", agencyName: "Tidewater", requesterName: "Sam", workspaceName: "Northline", access: "VIEW", url: "https://x.test/a" },
+      { template: "connection-ended", to: "a@b.co", agencyName: "Harbor & Pine", workspaceName: "Patagonia", endedBy: "AGENCY", url: "https://x.test/d" },
       { template: "plain", to: "a@b.co", subject: "Hello", text: "Line one\nLine two" },
     ] as const;
     for (const job of jobs) {
@@ -16,6 +18,13 @@ describe("email templates", () => {
       expect(email.html).toContain("<!doctype html>");
       expect(email.text.length).toBeGreaterThan(5);
     }
+  });
+
+  it("says what comes next based on where the confirmation link lands", () => {
+    const agency = render(emailJobSchema.parse({ template: "verify-email", to: "a@b.co", name: "Maya", url: "https://x.test/v?token=t&callbackURL=%2Fonboarding%3Fkind%3Dagency" }));
+    expect(agency.text).toContain("name your agency");
+    const invite = render(emailJobSchema.parse({ template: "verify-email", to: "a@b.co", name: "Maya", url: "https://x.test/v?token=t&callbackURL=%2Finvite%2Fabc" }));
+    expect(invite.text).toContain("invitation");
   });
 
   it("escapes user-supplied values in html", () => {
