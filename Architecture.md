@@ -7,7 +7,7 @@ This document is the map. Read the first two sections before changing anything; 
 ## 1. The rules that keep this simple
 
 1. **Two processes, one codebase.** `api` answers HTTP. `worker` runs background jobs. They never call each other; they talk through RabbitMQ.
-2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email and website reads already work this way; map builds and ad checks will too. **One exception:** onboarding's search-as-you-type lookups call Qloo inside the request, because a person is waiting on each keystroke. They are cached, time-limited and rate-limited instead (section 13).
+2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email, website reads and Culture Map builds work this way; ad checks will too. **One exception:** onboarding's search-as-you-type lookups call Qloo inside the request, because a person is waiting on each keystroke. They are cached, time-limited and rate-limited instead (section 13).
 3. **Every job is safe to run twice.** RabbitMQ delivers *at least once*. Handlers must be idempotent: check before you write, use upserts, key side effects by the job id.
 4. **Nothing fails silently.** A job either succeeds, is retried after a delay, or lands in the dead-letter queue with the reason attached. There is no fourth path.
 5. **A business owns its workspace; an agency is a connection to it.** Data a brand produces hangs off its workspace (`workspaceId`), never off an agency. See `prisma/schema.prisma` and `../design/data-model.html`.
@@ -101,7 +101,7 @@ Route handlers validate input with zod, call a service or Prisma, and return JSO
 | Exchange (topic) | Queue | Routing | Prefetch | Attempts | Retry delay | Consumer today |
 |---|---|---|---|---|---|---|
 | `xray.email` | `xray.email.send` | `email.#` | 10 | 5 | 15 s | yes |
-| `xray.jobs` | `xray.map.build` | `map.build` | 2 | 3 | 30 s | not yet (messages wait, never dropped) |
+| `xray.jobs` | `xray.map.build` | `map.build` | 2 | 3 | 30 s | yes (Culture Map builds, section 14) |
 | `xray.jobs` | `xray.ad.check` | `ad.check` | 1 | 3 | 60 s | not yet |
 | `xray.jobs` | `xray.site.read` | `site.read` | 4 | 2 | 2 s | yes (Firecrawl website reads, section 13) |
 | `xray.system` | `xray.system.diagnostics` | `system.#` | 5 | 2 | 0.5 s | yes |
@@ -145,7 +145,7 @@ Every dead letter carries headers: source queue, reason, error message and name,
 5. Add a test in `tests/` (happy path plus one failure).
 6. If it matters operationally, add an alert in `devops/prometheus/alerts.yml`.
 
-Ad checks and map builds will follow exactly this pattern.
+Map builds follow this pattern (section 14); ad checks will too.
 
 ---
 
@@ -264,6 +264,7 @@ pnpm stack up app    # runs api and worker as containers (production-like)
 pnpm test            # integration tests against the running containers and the database
 pnpm check           # typecheck
 pnpm lookup:smoke    # onboarding lookups against live Qloo, through the cache
+pnpm map:smoke <slug> [--rebuild]   # build a workspace's Culture Map through the real queue and print it
 ```
 
 Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus 9095, Grafana 3005. They avoid the defaults so other local stacks can run alongside.
@@ -285,6 +286,8 @@ Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus
 | Confirm email before any session | Invites, claims and join-by-domain all trust the address, so it must be proven first |
 | Search-as-you-type calls Qloo in the request | A person waits on each keystroke; a queue would add seconds. Two-level cache, single flight and timeouts keep it cheap and bounded |
 | Website reads go on a queue | Firecrawl takes 5–20 s; the web polls a job instead of holding a request open |
+| Map builds on RabbitMQ, not a second job system (Inngest was considered) | The worker already has retries, dead letters and the outbox. Resuming a build comes from saving each category as it finishes, not from a workflow engine, so there's one less container (~80 MB image) to run and secure |
+| Owners never see Qloo scores | Affinities bunch near 1 and lean percentages read as precision we don't have. The API returns labels and a 0–1 lean; the web turns them into words ("Only yours", "Shared with X · leans your way") |
 | Only resolved Qloo ids are saved | A map built on a name Qloo doesn't know would silently drop that brand |
 
 Done:
@@ -293,7 +296,9 @@ Done:
 Open:
 - This app's own sending domain (today it sends as `platform.learnitpal.com`), and hosting email images on it instead of Unsplash.
 - Per-client access for agency members (`member_client_access`): the tables exist and the clients list honours them, but there's no UI to narrow a member to some clients yet.
-- Billing, Qloo usage metering, maps, briefs and ad checks: the web shows sample data for these until the engine lands.
+- Billing, Qloo usage metering (the sidebar meter), briefs, plays beyond the overview's three, the Culture Map page and ad checks: the web shows sample data for these. The overview and the build screen are live.
+- Agencies can't read or build a client's map yet: map routes check direct membership only. Reuse the connection access rules when the agency client views go live.
+- Deleting a user straight from the database leaves their sessions alive in Redis (Better Auth's secondary storage) until they expire. Delete users through Better Auth, or revoke their sessions first.
 - Connection writes make several sequential round trips to Neon (about 7 s from Nairobi). Batch them or move the database closer before launch.
 - Alert delivery (Alertmanager, Slack or email) and production deployment target.
 - Onboarding lookups don't count against a workspace's Qloo quota yet; decide before metering lands.
@@ -371,4 +376,42 @@ To clear the cache for one call, delete its `qloo_cache` row and Redis key (`lk:
 - `POST /lookup/site` answers from cache when it can; otherwise it stores a `pending` job in Redis (`site:job:<id>`, 1 hour) and publishes `site.read`.
 - The worker calls Firecrawl `/v1/scrape` with a JSON schema, caches the result per domain, and marks the job `done`.
 - DNS failures and blocked sites are permanent; a second failure of anything else gives up. Either way the job is marked `failed` with "We couldn't open that website…", and the handler acks rather than dead-lettering, because the person has already moved on.
+
+---
+
+## 14. Culture Map builds (`src/modules/maps`)
+
+A map reads what a brand's customers listen to, watch, follow and visit, from Qloo, and splits it against up to three rivals into **yours / contested / theirs**. The build runs in the worker; the web only reads progress, so leaving the page, closing the tab or losing the connection never stops it.
+
+### 14.1 Files
+
+| File | Does |
+|---|---|
+| `map.shape.ts` | Pure rules, no I/O: the 8 categories, the insights parameters, reading Qloo entities, the territory split, the one-line reading per category. Tested in `tests/maps.test.ts`. |
+| `map.build.ts` | The `map.build` handler: resumable, one transaction per category, then marks the map ready, stores a `MAP_READY` notification and emails whoever started it. |
+| `map.service.ts` | `startBuild` (creates, resumes or returns a map, then publishes) and `latestMap` (the shape the overview and build screen read). |
+| `maps.routes.ts` | `POST /orgs/:id/maps` (owner, admin, strategist; 202) and `GET /orgs/:id/maps/latest` (any member). |
+
+### 14.2 What a build does
+
+1. **Sides.** Your side reads as your brand (when Qloo knows it) together with the brands your customers also buy, in one call (`signal.interests.entities=a,b,c`). Each rival is its own side. Brands added as new aren't in Qloo and are left out; onboarding says so.
+2. **Per category, per side:** one `/v2/insights` call, `take=20`. Lists are localised with `signal.location.query=United Kingdom|United States`; without it a global rival reads as its home market (Häagen-Dazs came back Japanese in the lab). Destinations use `filter.geocode.country_code` instead. Calls go through the lookup cache (7 days) with a 60 s timeout, at most 6 in flight per worker.
+3. **Split.** Only on your side → yours. On both → contested, credited to the rival that ranks it highest, with a lean from where it ranks on each side (affinities bunch at 0.95–0.99 and can't separate sides). Only a rival's → theirs.
+4. **Save.** One transaction per category: entities, one evidence row per call, associations, territory items, the reading, the query count. Image links are checked first; Qloo answers some with a redirect to a placeholder, and those are dropped.
+5. **Finish.** All 8 readings in → `READY`, `builtAt`, `thinData` when fewer than 20 items are yours or shared.
+
+Cost: 8 × (1 + rivals) calls, so 24 for two rivals. Measured: 44 s cold, about 20 s from cache (`pnpm map:smoke`), most of it Neon writes from far away.
+
+### 14.3 Failure and retries
+
+- A category that fails doesn't undo the others; the job is retried (3 attempts, 30 s apart) and skips categories that already have a reading.
+- On the last attempt the map is marked `FAILED` and the message goes to dead letters. The build screen says how many categories are saved and offers **Try again**, which re-queues the same map and resumes.
+- A Redis lock per map (15 min) stops a duplicate delivery building the same map twice at once.
+- `startBuild` returns the running build for the same brands and market, resumes a failed one, keeps a ready one unless `rebuild` is asked for, and otherwise starts a new map. If neither broker nor outbox take the job, the map is marked `FAILED` and the API answers 503.
+
+### 14.4 How the web uses it
+
+- Home (`/[org]`) reads `maps/latest` on the server: building or failed → the build screen; ready → the overview; none → "Build my map".
+- The build screen polls every 2 s and pauses while the tab is hidden.
+- The overview's headline, four columns and three plays come only from map items. Every claim is in plain words; no affinity or percentage is shown.
 

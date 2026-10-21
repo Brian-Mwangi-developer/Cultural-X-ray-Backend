@@ -8,15 +8,17 @@ import type { HandlerMap, QueueSpec } from "@/messaging/types";
 import { emailHandlers } from "@/modules/email/email.queue";
 import { diagnosticHandlers } from "@/modules/ops/diagnostics.queue";
 import { siteHandlers } from "@/modules/lookup/site";
+import { mapHandlers } from "@/modules/maps/map.build";
 
 /**
- * Queue → handlers. A queue that is declared but not listed here (map build, ad check)
+ * Queue → handlers. A queue that is declared but not listed here (ad check)
  * keeps its messages until a handler ships; nothing is consumed and silently dropped.
  */
 const CONSUMERS: Array<[QueueSpec, HandlerMap]> = [
   [QUEUES.email, emailHandlers],
   [QUEUES.diagnostics, diagnosticHandlers],
   [QUEUES.siteRead, siteHandlers],
+  [QUEUES.mapBuild, mapHandlers],
 ];
 
 async function declare(): Promise<void> {

@@ -1,0 +1,124 @@
+/**
+ * The Culture Map's rules, with no I/O: which categories a map reads, how lists from your side
+ * and your rivals' become yours / contested / theirs, and the sentence each category gets.
+ * Rules come from the map-build lab (test/map-build) and are covered by tests/maps.test.ts.
+ */
+
+export type Market = "GB" | "US";
+export type Kind = "PODCAST" | "MOVIE" | "TV_SHOW" | "PERSON" | "ARTIST" | "DESTINATION" | "BRAND" | "BOOK";
+export type Label = "YOURS" | "CONTESTED" | "THEIRS";
+
+export type Category = { kind: Kind; urn: string; label: string; noun: string; verb: string };
+
+/** In build order: the categories the overview shows first are read first. */
+export const CATEGORIES: Category[] = [
+  { kind: "PODCAST", urn: "urn:entity:podcast", label: "Podcasts", noun: "podcasts", verb: "listen to" },
+  { kind: "MOVIE", urn: "urn:entity:movie", label: "Films", noun: "films", verb: "watch" },
+  { kind: "TV_SHOW", urn: "urn:entity:tv_show", label: "TV", noun: "TV shows", verb: "watch" },
+  { kind: "DESTINATION", urn: "urn:entity:destination", label: "Places", noun: "places", verb: "go to" },
+  { kind: "PERSON", urn: "urn:entity:person", label: "Creators", noun: "creators", verb: "follow" },
+  { kind: "ARTIST", urn: "urn:entity:artist", label: "Artists", noun: "artists", verb: "listen to" },
+  { kind: "BRAND", urn: "urn:entity:brand", label: "Brands", noun: "brands", verb: "also buy" },
+  { kind: "BOOK", urn: "urn:entity:book", label: "Books", noun: "books", verb: "read" },
+];
+
+export const categoryOf = (kind: string) => CATEGORIES.find((c) => c.kind === kind);
+
+const COUNTRY: Record<Market, string> = { GB: "United Kingdom", US: "United States" };
+
+/**
+ * One insights call for one side. Lists are localised to the market: without it a global rival
+ * reads as its home country (Häagen-Dazs came back Japanese for a UK map). Destinations are
+ * kept inside the country instead, since a location signal there would only bias, not filter.
+ */
+export function insightsParams(category: Category, signalIds: string[], market: Market, take = 20): Record<string, string | number> {
+  const base = { "filter.type": category.urn, "signal.interests.entities": signalIds.join(","), take };
+  return category.kind === "DESTINATION" ? { ...base, "filter.geocode.country_code": market } : { ...base, "signal.location.query": COUNTRY[market] };
+}
+
+export type Entity = { id: string; name: string; popularity: number | null; affinity: number; image: string | null; detail: string | null };
+
+type Raw = {
+  entity_id?: string;
+  name?: string;
+  popularity?: number;
+  disambiguation?: string;
+  query?: { affinity?: number };
+  properties?: { image?: { url?: string }; geocode?: { admin1_region?: string; admin2_region?: string } };
+};
+
+/** Insights entities as the map stores them. Unusable rows (no id, popularity 0) are dropped. */
+export function entitiesOf(body: unknown, exclude: Set<string>): Entity[] {
+  const list = ((body as { results?: { entities?: Raw[] } })?.results?.entities ?? []) as Raw[];
+  const out: Entity[] = [];
+  for (const e of list) {
+    if (!e.entity_id || !e.name || exclude.has(e.entity_id) || e.popularity === 0) continue;
+    const geo = e.properties?.geocode;
+    out.push({
+      id: e.entity_id,
+      name: e.name,
+      popularity: typeof e.popularity === "number" ? e.popularity : null,
+      affinity: typeof e.query?.affinity === "number" ? e.query.affinity : 0,
+      image: e.properties?.image?.url ?? null,
+      detail: geo ? [geo.admin2_region, geo.admin1_region].filter(Boolean).join(", ") || null : e.disambiguation || null,
+    });
+  }
+  return out;
+}
+
+/** Qloo answers 200 with `warnings` when it silently dropped a signal. */
+export const warningsOf = (body: unknown) => {
+  const w = (body as { warnings?: unknown })?.warnings;
+  return Array.isArray(w) && w.length ? w : null;
+};
+
+export type Split = { entity: Entity; label: Label; rival: string | null; lean: number | null; rank: number };
+
+/**
+ * Compare one category's lists. `yours` is your side's list; `rivals` maps each rival's subject
+ * id to its list. Qloo's affinities bunch up near 1 (0.95–0.99 in the lab), so a shared item's
+ * lean comes from where it ranks on each side instead: your share, 0–1, where 0.5 is even.
+ * With no rivals everything is yours: there's nothing to contest.
+ */
+export function splitTerritory(yours: Entity[], rivals: Map<string, Entity[]>): Split[] {
+  const standing = (rank: number, length: number) => 1 - rank / Math.max(length, 1);
+  const out: Split[] = [];
+  const theirs = new Map<string, { entity: Entity; rival: string; rank: number; score: number }>();
+  for (const [rival, list] of rivals) {
+    list.forEach((entity, rank) => {
+      const score = standing(rank, list.length);
+      const seen = theirs.get(entity.id);
+      if (!seen || score > seen.score || (score === seen.score && entity.affinity > seen.entity.affinity)) theirs.set(entity.id, { entity, rival, rank, score });
+    });
+  }
+  yours.forEach((entity, rank) => {
+    const shared = theirs.get(entity.id);
+    if (!shared) return void out.push({ entity, label: "YOURS", rival: null, lean: null, rank });
+    const mine = standing(rank, yours.length);
+    out.push({ entity, label: "CONTESTED", rival: shared.rival, lean: mine / (mine + shared.score), rank });
+    theirs.delete(entity.id);
+  });
+  for (const { entity, rival, rank } of theirs.values()) out.push({ entity, label: "THEIRS", rival, lean: null, rank: yours.length + rank });
+  return out;
+}
+
+const list = (names: string[]) => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+
+/**
+ * The one-line reading for a category, built only from what the lists say. No adjectives we
+ * can't back: names, who holds them, and who they're shared with.
+ */
+export function readingFor(category: Category, split: Split[], rivalName: (subjectId: string) => string): string | null {
+  const mine = split.filter((s) => s.label !== "THEIRS").sort((a, b) => a.rank - b.rank);
+  if (!mine.length) return null;
+  const lead = `Your customers ${category.verb} ${list(mine.slice(0, 3).map((s) => s.entity.name))}.`;
+  const contested = mine.filter((s) => s.label === "CONTESTED");
+  const top = contested[0];
+  if (!top) return split.some((s) => s.label === "THEIRS") ? `${lead} None of it is shared with your rivals.` : lead;
+  const who = rivalName(top.rival!);
+  if (contested.length === 1) return `${lead} ${top.entity.name} is shared with ${who}.`;
+  const tally = new Map<string, number>();
+  for (const s of contested) tally.set(s.rival!, (tally.get(s.rival!) ?? 0) + 1);
+  const most = rivalName([...tally.entries()].sort((a, b) => b[1] - a[1])[0]![0]);
+  return `${lead} ${contested.length} of these ${category.noun} are shared, most with ${most}.`;
+}

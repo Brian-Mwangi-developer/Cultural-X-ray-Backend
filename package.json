@@ -23,7 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ses:verify": "tsx src/scripts/ses-verify.ts",
-    "lookup:smoke": "tsx src/scripts/lookup-smoke.ts"
+    "lookup:smoke": "tsx src/scripts/lookup-smoke.ts",
+    "map:smoke": "tsx src/scripts/map-smoke.ts"
   },
   "packageManager": "pnpm@11.18.0",
   "dependencies": {

@@ -18,7 +18,9 @@ export function sampleEmail(template: Exclude<EmailTemplate, "plain">, to: strin
       return { template, to, agencyName: "Tidewater Studio", requesterName: "Sam Okoro", workspaceName: "Northline Outdoor", access: "VIEW", url: `${web}/login?sample=request` };
     case "connection-ended":
       return { template, to, agencyName: "Harbor & Pine", workspaceName: "Patagonia", endedBy: "AGENCY", url: `${web}/login?sample=ended` };
+    case "map-ready":
+      return { template, to, name: "Tomás Reyes", workspaceName: "Jude's Ice Cream", reading: "Your customers listen to RedHanded, All Killa No Filla and Real Crime Profile. RedHanded is shared with Ben & Jerry's.", url: `${web}/login?sample=map` };
   }
 }
 
-export const SAMPLE_TEMPLATES = ["verify-email", "reset-password", "organization-invite", "workspace-claim", "connection-request", "connection-ended"] as const;
+export const SAMPLE_TEMPLATES = ["verify-email", "reset-password", "organization-invite", "workspace-claim", "connection-request", "connection-ended", "map-ready"] as const;

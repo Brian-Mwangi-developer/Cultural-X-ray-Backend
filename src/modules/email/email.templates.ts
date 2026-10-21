@@ -44,6 +44,7 @@ export const emailJobSchema = z.discriminatedUnion("template", [
     endedBy: z.enum(["AGENCY", "WORKSPACE"]),
     url: z.url(),
   }),
+  z.object({ template: z.literal("map-ready"), to: z.email(), name: z.string(), workspaceName: z.string(), reading: z.string(), url: z.url() }),
   z.object({ template: z.literal("plain"), to: z.email(), subject: z.string().min(1), text: z.string().min(1) }),
 ]);
 
@@ -441,6 +442,22 @@ export function render(job: EmailJob): RenderedEmail {
         ]),
       };
     }
+
+    case "map-ready":
+      return {
+        subject: `${job.workspaceName}'s Culture Map is ready`,
+        html: layout({
+          preheader: job.reading || "See what your customers watch, listen to and where they go.",
+          label: "Culture Map",
+          eyebrow: "Ready",
+          heading: `${job.workspaceName}'s Culture Map is ready`,
+          intro: `Hi ${escape(firstName(job.name))}, we've read the culture around ${escape(job.workspaceName)}: what your customers listen to, watch and follow, where they go, and which of it your rivals share.${job.reading ? `<br><br><strong class="x-ink" style="color:${INK}">${escape(job.reading)}</strong>` : ""}`,
+          image: { src: PHOTOS.lakes, alt: "A lake between hills at first light" },
+          action: { label: "See your overview", url: job.url },
+          security: `You're getting this because you started a Culture Map for ${escape(job.workspaceName)}.`,
+        }),
+        text: textVersion([`${job.workspaceName}'s Culture Map is ready.`, job.reading, "", `See your overview: ${job.url}`]),
+      };
 
     case "plain":
       return {

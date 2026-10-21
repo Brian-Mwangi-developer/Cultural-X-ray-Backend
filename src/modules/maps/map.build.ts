@@ -1,0 +1,221 @@
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import type { Prisma } from "@/generated/prisma/client";
+import { config } from "@/config/env";
+import { prisma } from "@/infra/database";
+import { redis } from "@/infra/redis";
+import { errorDetails, logger } from "@/observability/logger";
+import { QUEUES } from "@/messaging/topology";
+import { type Handler, type HandlerMap, Outcome, PermanentError } from "@/messaging/types";
+import { enqueueEmail, isUndeliverable } from "@/modules/email/email.queue";
+import { cacheKey, TTL } from "@/modules/lookup/cache";
+import { qloo } from "@/modules/lookup/qloo.client";
+import { type Category, CATEGORIES, type Entity, entitiesOf, insightsParams, type Market, readingFor, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
+
+/**
+ * Building a Culture Map in the worker. The web only reads progress, so leaving the page,
+ * closing the tab or losing the connection never stops a build.
+ *
+ * Resumable: each category is saved in one transaction together with its reading, and a retry
+ * skips the categories that already have one. Qloo answers are cached, so a retry costs almost
+ * nothing for what was already fetched.
+ */
+
+export const MAP_BUILD = "map.build";
+const INSIGHTS = "/v2/insights";
+/** Insights calls take 1–40 s (map-build lab). Enough in flight to finish in about a minute without flooding Qloo. */
+const IN_FLIGHT = 6;
+const LOCK_SECONDS = 15 * 60;
+
+/** A small semaphore, shared by every build in this worker. */
+let running = 0;
+const waiting: (() => void)[] = [];
+async function limited<T>(work: () => Promise<T>): Promise<T> {
+  if (running >= IN_FLIGHT) await new Promise<void>((resolve) => waiting.push(resolve));
+  running++;
+  try {
+    return await work();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
+type Side = { subjectId: string; name: string; ids: string[] };
+type Answer = { side: Side; entities: Entity[]; evidence: { id: string; params: Record<string, string | number>; key: string; ms: number; warnings: unknown[] | null } };
+
+async function ask(category: Category, side: Side, market: Market, exclude: Set<string>): Promise<Answer> {
+  const params = insightsParams(category, side.ids, market);
+  const started = Date.now();
+  const body = await limited(() => qloo(INSIGHTS, params, TTL.insights, { timeoutMs: 60_000, tries: 3 }));
+  return {
+    side,
+    entities: entitiesOf(body, exclude),
+    evidence: { id: randomUUID(), params, key: cacheKey(INSIGHTS, params), ms: Date.now() - started, warnings: warningsOf(body) },
+  };
+}
+
+/** Some Qloo image links redirect to a 14px placeholder; only a direct 200 is real artwork. */
+async function liveImage(url: string | null) {
+  if (!url) return null;
+  try {
+    const res = await fetch(url, { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(4_000) });
+    return res.status === 200 ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Check artwork for the items the overview and build screen show first. The rest keep Qloo's link. */
+async function checkImages(entities: Entity[], top = 8): Promise<string[]> {
+  const dead: string[] = [];
+  await Promise.all(
+    entities.slice(0, top).map(async (e) => {
+      const had = e.image;
+      e.image = await liveImage(had);
+      if (had && !e.image) dead.push(e.id);
+    }),
+  );
+  return dead;
+}
+
+type Plan = { mapId: string; market: Market; you: Side; rivals: Side[]; exclude: Set<string> };
+
+/** One category: ask every side, split the lists, save everything (and the reading) at once. */
+async function buildCategory(plan: Plan, category: Category) {
+  const [mine, theirs] = await Promise.all([ask(category, plan.you, plan.market, plan.exclude), Promise.all(plan.rivals.map((side) => ask(category, side, plan.market, plan.exclude)))]);
+  const dead = (await Promise.all([mine, ...theirs].map((a) => checkImages(a.entities)))).flat();
+  const split = splitTerritory(mine.entities, new Map(theirs.map((a) => [a.side.subjectId, a.entities])));
+  const names = new Map(plan.rivals.map((r) => [r.subjectId, r.name]));
+  const text = readingFor(category, split, (id) => names.get(id) ?? "a rival") ?? `No ${category.noun} stand out for your customers yet.`;
+
+  const answers = [mine, ...theirs];
+  const entities = new Map(answers.flatMap((a) => a.entities.map((e) => [e.id, e] as const)));
+  // An evidence row points at its cached answer only when that row is really there.
+  const keys = new Set((await prisma.qlooCache.findMany({ where: { key: { in: answers.map((a) => a.evidence.key) } }, select: { key: true } })).map((r) => r.key));
+  const evidenceOf = new Map(answers.map((a) => [a.side.subjectId, a.evidence.id]));
+
+  await prisma.$transaction([
+    prisma.qlooEntity.createMany({
+      data: [...entities.values()].map((e) => ({ id: e.id, kind: category.kind, name: e.name, popularity: e.popularity, imageUrl: e.image, properties: e.detail ? { detail: e.detail } : undefined })),
+      skipDuplicates: true,
+    }),
+    // Rows stored by an earlier build keep their old link; clear the ones we just found dead.
+    prisma.qlooEntity.updateMany({ where: { id: { in: dead } }, data: { imageUrl: null } }),
+    prisma.evidence.createMany({
+      data: answers.map((a) => ({
+        id: a.evidence.id,
+        path: INSIGHTS,
+        params: a.evidence.params,
+        cacheKey: keys.has(a.evidence.key) ? a.evidence.key : null,
+        status: a.evidence.warnings ? "WARNING" : "OK",
+        warnings: (a.evidence.warnings as Prisma.InputJsonArray | null) ?? undefined,
+        durationMs: a.evidence.ms,
+      })),
+    }),
+    prisma.association.createMany({
+      data: answers.flatMap((a) =>
+        a.entities.map((e, rank) => ({ mapId: plan.mapId, subjectId: a.side.subjectId, entityId: e.id, category: category.kind, rank, affinity: e.affinity, evidenceId: a.evidence.id })),
+      ),
+      skipDuplicates: true,
+    }),
+    prisma.territoryItem.createMany({
+      data: split.map((s) => ({
+        mapId: plan.mapId,
+        entityId: s.entity.id,
+        category: category.kind,
+        label: s.label,
+        leanSelf: s.lean,
+        rivalSubjectId: s.rival,
+        evidenceId: evidenceOf.get(s.label === "THEIRS" ? s.rival! : plan.you.subjectId) ?? null,
+      })),
+      skipDuplicates: true,
+    }),
+    prisma.mapReading.deleteMany({ where: { mapId: plan.mapId, category: category.kind } }),
+    prisma.mapReading.create({ data: { mapId: plan.mapId, category: category.kind, text, evidence: { connect: answers.map((a) => ({ id: a.evidence.id })) } } }),
+    prisma.cultureMap.update({ where: { id: plan.mapId }, data: { queryCount: { increment: answers.length } } }),
+  ]);
+  const done = await prisma.mapReading.count({ where: { mapId: plan.mapId } });
+  await prisma.cultureMap.update({ where: { id: plan.mapId }, data: { categoriesDone: done } });
+}
+
+async function planFor(mapId: string) {
+  const map = await prisma.cultureMap.findUnique({
+    where: { id: mapId },
+    select: {
+      id: true, status: true, market: true, workspaceId: true, createdById: true,
+      workspace: { select: { name: true, slug: true } },
+      subjects: { orderBy: { position: "asc" }, select: { id: true, role: true, entityId: true, entity: { select: { name: true } } } },
+      readings: { select: { category: true } },
+    },
+  });
+  if (!map) return null;
+  // Your side reads as your brand (when Qloo knows it) together with the brands your customers
+  // also buy, exactly as onboarding's review promised. The seeds fill out a small brand's thin data.
+  const youSubjects = map.subjects.filter((s) => s.role !== "RIVAL");
+  const first = youSubjects.find((s) => s.role === "SELF") ?? youSubjects[0];
+  if (!first) throw new PermanentError(`map ${mapId} has nothing to read through`);
+  const plan: Plan = {
+    mapId,
+    market: map.market as Market,
+    you: { subjectId: first.id, name: map.workspace.name, ids: youSubjects.map((s) => s.entityId) },
+    rivals: map.subjects.filter((s) => s.role === "RIVAL").map((s) => ({ subjectId: s.id, name: s.entity.name, ids: [s.entityId] })),
+    exclude: new Set(map.subjects.map((s) => s.entityId)),
+  };
+  return { map, plan, done: new Set(map.readings.map((r) => r.category as string)) };
+}
+
+/** Ready: mark it once, then tell the person who started it. */
+async function finish(mapId: string, workspaceId: string, workspace: { name: string; slug: string }, createdById: string | null) {
+  const mine = await prisma.territoryItem.count({ where: { mapId, label: { in: ["YOURS", "CONTESTED"] } } });
+  const flipped = await prisma.cultureMap.updateMany({ where: { id: mapId, status: { not: "READY" } }, data: { status: "READY", builtAt: new Date(), thinData: mine < 20 } });
+  if (!flipped.count || !createdById) return;
+  const user = await prisma.user.findUnique({ where: { id: createdById }, select: { email: true, name: true } });
+  const podcast = await prisma.mapReading.findFirst({ where: { mapId, category: "PODCAST" }, select: { text: true } });
+  const url = `${config.http.publicWebUrl}/${workspace.slug}`;
+  await prisma.notification
+    .create({ data: { userId: createdById, organizationId: workspaceId, kind: "MAP_READY", title: `${workspace.name}'s Culture Map is ready`, body: podcast?.text, targetType: "culture_map", targetId: mapId } })
+    .catch((error) => logger.warn({ mapId, ...errorDetails(error) }, "map: could not store notification"));
+  if (user && !isUndeliverable(user.email)) {
+    await enqueueEmail({ template: "map-ready", to: user.email, name: user.name, workspaceName: workspace.name, reading: podcast?.text ?? "", url });
+  }
+}
+
+const jobSchema = z.object({ mapId: z.string().min(1) });
+
+const buildMap: Handler<typeof jobSchema> = {
+  schema: jobSchema,
+  async handle({ mapId }, envelope) {
+    const lock = `map:build:${mapId}`;
+    // A duplicate delivery of the same build waits its turn; the copy holding the lock finishes it.
+    if (redis.status === "ready" && (await redis.set(lock, envelope.id, "EX", LOCK_SECONDS, "NX")) !== "OK" && (await redis.get(lock)) !== envelope.id) {
+      return Outcome.Skipped;
+    }
+    try {
+      const found = await planFor(mapId);
+      if (!found || found.map.status === "READY") return Outcome.Skipped;
+      const { map, plan, done } = found;
+      await prisma.cultureMap.update({ where: { id: mapId }, data: { status: "BUILDING" } });
+
+      const todo = CATEGORIES.filter((c) => !done.has(c.kind));
+      const results = await Promise.allSettled(todo.map((c) => buildCategory(plan, c)));
+      const failed = results.flatMap((r, i) => (r.status === "rejected" ? [{ category: todo[i]?.kind, error: r.reason as unknown }] : []));
+      const first = failed[0];
+      if (first) {
+        logger.warn({ mapId, failed: failed.map((f) => f.category), attempt: envelope.attempt, ...errorDetails(first.error) }, "map build: categories failed");
+        if (envelope.attempt >= QUEUES.mapBuild.maxAttempts) await prisma.cultureMap.update({ where: { id: mapId }, data: { status: "FAILED" } });
+        throw first.error instanceof Error ? first.error : new Error(String(first.error));
+      }
+      await finish(mapId, map.workspaceId, map.workspace, map.createdById);
+      logger.info({ mapId, categories: todo.length }, "map built");
+      return Outcome.Processed;
+    } catch (error) {
+      if (error instanceof PermanentError) await prisma.cultureMap.update({ where: { id: mapId }, data: { status: "FAILED" } }).catch(() => undefined);
+      throw error;
+    } finally {
+      if (redis.status === "ready") await redis.del(lock).catch(() => undefined);
+    }
+  },
+};
+
+export const mapHandlers: HandlerMap = { [MAP_BUILD]: buildMap as Handler };
