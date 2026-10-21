@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { CATEGORIES, type Entity, entitiesOf, insightsParams, readingFor, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
+import { audienceParams, CATEGORIES, type Entity, entitiesOf, insightsParams, readingFor, scoreOf, scoresIn, SEGMENTS, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
 
 // Names and affinities from real answers saved in test/map-build/json.
-const e = (name: string, affinity: number): Entity => ({ id: name, name, popularity: 0.9, affinity, image: null, detail: null });
+const e = (name: string, affinity: number): Entity => ({ id: name, name, popularity: 0.9, affinity, image: null, detail: null, location: null });
 const podcasts = CATEGORIES.find((c) => c.kind === "PODCAST")!;
 const places = CATEGORIES.find((c) => c.kind === "DESTINATION")!;
 const rivalName = (id: string) => ({ bj: "Ben & Jerry's", hd: "Häagen-Dazs" })[id] ?? "a rival";
@@ -84,5 +84,31 @@ describe("maps: readings", () => {
   it("says when nothing is shared, and stays quiet when nothing is yours", () => {
     expect(readingFor(places, splitTerritory([e("Bath", 0.9)], new Map([["bj", [e("Cowes", 0.9)]]])), rivalName)).toBe("Your customers go to Bath. None of it is shared with your rivals.");
     expect(readingFor(places, splitTerritory([], new Map([["bj", [e("Cowes", 0.9)]]])), rivalName)).toBeNull();
+  });
+});
+
+describe("maps: audience", () => {
+  const age55 = SEGMENTS.find((s) => s.value === "55_and_older")!;
+  const women = SEGMENTS.find((s) => s.value === "female")!;
+
+  it("scores every brand in one call, without a location signal", () => {
+    const p = audienceParams(women, ["a", "b"]);
+    expect(p).toMatchObject({ "filter.results.entities": "a,b", "signal.demographics.gender": "female" });
+    expect(p).not.toHaveProperty("signal.location.query");
+  });
+
+  it("hides Qloo's fill values and flags thin older bands", () => {
+    // 0.55405379801747 came back for three different brand and band pairs in the lab.
+    expect(scoreOf(women, 0.55405379801747)).toEqual({ value: null, masked: true, lowConfidence: false });
+    expect(scoreOf(women, 0.76)).toMatchObject({ masked: true });
+    expect(scoreOf(age55, 0.616)).toMatchObject({ value: 0.616, lowConfidence: true });
+    expect(scoreOf(age55, 0.947)).toMatchObject({ lowConfidence: false });
+    expect(scoreOf(women, undefined)).toEqual({ value: null, masked: false, lowConfidence: false });
+  });
+
+  it("reads scores by entity id", () => {
+    const scores = scoresIn({ results: { entities: [{ entity_id: "j", query: { affinity: 0.9 } }] } }, women);
+    expect(scores.get("j")?.value).toBe(0.9);
+    expect(scores.has("x")).toBe(false);
   });
 });

@@ -390,7 +390,7 @@ A map reads what a brand's customers listen to, watch, follow and visit, from Ql
 | `map.shape.ts` | Pure rules, no I/O: the 8 categories, the insights parameters, reading Qloo entities, the territory split, the one-line reading per category. Tested in `tests/maps.test.ts`. |
 | `map.build.ts` | The `map.build` handler: resumable, one transaction per category, then marks the map ready, stores a `MAP_READY` notification and emails whoever started it. |
 | `map.service.ts` | `startBuild` (creates, resumes or returns a map, then publishes) and `latestMap` (the shape the overview and build screen read). |
-| `maps.routes.ts` | `POST /orgs/:id/maps` (owner, admin, strategist; 202) and `GET /orgs/:id/maps/latest` (any member). |
+| `maps.routes.ts` | `POST /orgs/:id/maps` (owner, admin, strategist; 202), `GET /orgs/:id/maps/latest` and `GET /orgs/:id/maps/latest/audience` (any member). |
 
 ### 14.2 What a build does
 
@@ -398,9 +398,11 @@ A map reads what a brand's customers listen to, watch, follow and visit, from Ql
 2. **Per category, per side:** one `/v2/insights` call, `take=20`. Lists are localised with `signal.location.query=United Kingdom|United States`; without it a global rival reads as its home market (Häagen-Dazs came back Japanese in the lab). Destinations use `filter.geocode.country_code` instead. Calls go through the lookup cache (7 days) with a 60 s timeout, at most 6 in flight per worker.
 3. **Split.** Only on your side → yours. On both → contested, credited to the rival that ranks it highest, with a lean from where it ranks on each side (affinities bunch at 0.95–0.99 and can't separate sides). Only a rival's → theirs.
 4. **Save.** One transaction per category: entities, one evidence row per call, associations, territory items, the reading, the query count. Image links are checked first; Qloo answers some with a redirect to a placeholder, and those are dropped.
-5. **Finish.** All 8 readings in → `READY`, `builtAt`, `thinData` when fewer than 20 items are yours or shared.
+5. **Places on the globe.** The Places category also writes one `geo_signal` per side and place, with its rank and location, for the Audience & places globe.
+6. **Who they are.** One call per age band and gender (8 calls) scores every brand on the map at once (`filter.results.entities`), with **no** location signal: with one, scores bunch near 1 and some brands vanish from the answer. Qloo's fill values for "no data" (0.554054 and 0.76) are masked, and 45+ scores between 0.55 and 0.66 are flagged as thin data (brand lab). Saved to `audience_index` in one transaction; a retry skips it once rows exist. Your side is your brand when Qloo knows it, otherwise the average of the brands your customers also buy.
+7. **Finish.** All 8 readings and the audience in → `READY`, `builtAt`, `thinData` when fewer than 20 items are yours or shared.
 
-Cost: 8 × (1 + rivals) calls, so 24 for two rivals. Measured: 44 s cold, about 20 s from cache (`pnpm map:smoke`), most of it Neon writes from far away.
+Cost: 8 × (1 + rivals) + 8 calls, so 32 for two rivals. Measured: 44 s cold, about 20 s from cache (`pnpm map:smoke`), most of it Neon writes from far away.
 
 ### 14.3 Failure and retries
 
@@ -414,4 +416,5 @@ Cost: 8 × (1 + rivals) calls, so 24 for two rivals. Measured: 44 s cold, about 
 - Home (`/[org]`) reads `maps/latest` on the server: building or failed → the build screen; ready → the overview; none → "Build my map".
 - The build screen polls every 2 s and pauses while the tab is hidden.
 - The overview's headline, four columns and three plays come only from map items. Every claim is in plain words; no affinity or percentage is shown.
+- Audience & places (`/[org]/audience`) turns scores into words in `web/src/lib/audience.ts`: "Very strong" to "Weak", "thin data", "Not enough data", who leads each group compared with you, and places by rank ("Top pick for Jude's", "Not in Häagen-Dazs' top 20"). Scores only shade the cells and the globe. Maps built before the audience step offer a rebuild.
 

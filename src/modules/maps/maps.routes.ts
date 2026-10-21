@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { membershipOf, requireRole } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
-import { latestMap, startBuild } from "@/modules/maps/map.service";
+import { audienceOf, latestMap, startBuild } from "@/modules/maps/map.service";
 
 export const mapsRouter = Router();
 
@@ -30,6 +30,17 @@ mapsRouter.get("/orgs/:id/maps/latest", requireAuth, async (req, res, next) => {
     const { user } = sessionOf(req);
     const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
     res.set("Cache-Control", "no-store").json({ map: await latestMap(organization.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Who each brand reaches and where, from the latest ready map. Any member can read it. */
+mapsRouter.get("/orgs/:id/maps/latest/audience", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    res.set("Cache-Control", "no-store").json({ audience: await audienceOf(organization.id) });
   } catch (error) {
     next(error);
   }

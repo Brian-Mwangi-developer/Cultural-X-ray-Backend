@@ -3,7 +3,7 @@ import { HttpError } from "@/http/errors";
 import { publish } from "@/messaging/publisher";
 import { EXCHANGES } from "@/messaging/topology";
 import { MAP_BUILD } from "@/modules/maps/map.build";
-import { CATEGORIES } from "@/modules/maps/map.shape";
+import { CATEGORIES, SEGMENTS } from "@/modules/maps/map.shape";
 
 type Pick = { id?: string; name: string; kind: "brand" | "place" | "new" };
 type Intent = { brand?: Pick; rivals?: Pick[]; seeds?: Pick[] };
@@ -139,5 +139,68 @@ export async function latestMap(workspaceId: string, perCategory = 8) {
     associations: items.length,
     subjects: map.subjects.map((s) => ({ id: s.id, role: s.role, entityId: s.entityId, name: s.entity.name, image: s.entity.imageUrl })),
     categories,
+  };
+}
+
+type Cell = { value: number | null; masked: boolean; lowConfidence: boolean };
+
+/**
+ * The Audience & places page: who each side reaches (age and gender) and where its customers go.
+ * "you" is your brand when Qloo knows it, otherwise the average of the brands your customers also buy.
+ * Scores go to the web only to shade cells; the page puts them into words.
+ */
+export async function audienceOf(workspaceId: string) {
+  const map = await prisma.cultureMap.findFirst({
+    where: { workspaceId, status: "READY" },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true, market: true, builtAt: true, queryCount: true,
+      subjects: { orderBy: { position: "asc" }, select: { id: true, role: true, entity: { select: { name: true } } } },
+      audienceIndexes: { select: { subjectId: true, audience: true, value: true, placeholderMasked: true, lowConfidence: true } },
+      geoSignals: { where: { kind: "DESTINATION" }, select: { subjectId: true, entityId: true, label: true, rank: true, payload: true } },
+      territoryItems: { where: { category: "DESTINATION" }, select: { entityId: true, label: true, rivalSubjectId: true } },
+    },
+  });
+  if (!map) return null;
+  const self = map.subjects.find((s) => s.role === "SELF");
+  const seeds = map.subjects.filter((s) => s.role === "SEED");
+  const rivals = map.subjects.filter((s) => s.role === "RIVAL");
+  const youSubject = (self ?? seeds[0])?.id ?? "";
+  const yourSources = self ? [self.id] : seeds.map((s) => s.id);
+  const name = new Map(map.subjects.map((s) => [s.id, s.entity.name]));
+
+  const cellOf = (subjectId: string, audience: string): Cell => {
+    const row = map.audienceIndexes.find((a) => a.subjectId === subjectId && a.audience === audience);
+    return row ? { value: row.value, masked: row.placeholderMasked, lowConfidence: row.lowConfidence } : { value: null, masked: false, lowConfidence: false };
+  };
+  const yoursOf = (audience: string): Cell => {
+    const cells = yourSources.map((id) => cellOf(id, audience));
+    const values = cells.map((c) => c.value).filter((v): v is number => v != null);
+    return { value: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null, masked: !values.length && cells.some((c) => c.masked), lowConfidence: cells.some((c) => c.lowConfidence) };
+  };
+
+  const label = new Map(map.territoryItems.map((t) => [t.entityId, t]));
+  const places = new Map<string, { id: string; name: string; detail: string | null; lat: number | null; lon: number | null; label: "YOURS" | "CONTESTED" | "THEIRS"; rival: string | null; ranks: Record<string, number> }>();
+  for (const g of map.geoSignals) {
+    const payload = (g.payload ?? {}) as { lat?: number | null; lon?: number | null; detail?: string | null };
+    const t = g.entityId ? label.get(g.entityId) : undefined;
+    if (!g.entityId || !t) continue;
+    const place = places.get(g.entityId) ?? { id: g.entityId, name: g.label, detail: payload.detail ?? null, lat: payload.lat ?? null, lon: payload.lon ?? null, label: t.label, rival: t.rivalSubjectId ? name.get(t.rivalSubjectId) ?? null : null, ranks: {} };
+    place.ranks[g.subjectId === youSubject ? "you" : g.subjectId] = (g.rank ?? 0) + 1;
+    places.set(g.entityId, place);
+  }
+
+  return {
+    id: map.id,
+    market: map.market,
+    builtAt: map.builtAt,
+    queryCount: map.queryCount,
+    hasAudience: map.audienceIndexes.length > 0,
+    sides: [
+      { key: "you", name: self ? self.entity.name : seeds.map((s) => s.entity.name).join(" and "), readThrough: !self },
+      ...rivals.map((r) => ({ key: r.id, name: r.entity.name, readThrough: false })),
+    ],
+    segments: SEGMENTS.map((s) => ({ key: s.key, label: s.label, cells: { you: yoursOf(s.key), ...Object.fromEntries(rivals.map((r) => [r.id, cellOf(r.id, s.key)])) } })),
+    places: [...places.values()],
   };
 }

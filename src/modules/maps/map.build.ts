@@ -10,7 +10,7 @@ import { type Handler, type HandlerMap, Outcome, PermanentError } from "@/messag
 import { enqueueEmail, isUndeliverable } from "@/modules/email/email.queue";
 import { cacheKey, TTL } from "@/modules/lookup/cache";
 import { qloo } from "@/modules/lookup/qloo.client";
-import { type Category, CATEGORIES, type Entity, entitiesOf, insightsParams, type Market, readingFor, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
+import { audienceParams, type Category, CATEGORIES, type Entity, entitiesOf, insightsParams, type Market, readingFor, scoresIn, SEGMENTS, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
 
 /**
  * Building a Culture Map in the worker. The web only reads progress, so leaving the page,
@@ -79,7 +79,7 @@ async function checkImages(entities: Entity[], top = 8): Promise<string[]> {
   return dead;
 }
 
-type Plan = { mapId: string; market: Market; you: Side; rivals: Side[]; exclude: Set<string> };
+type Plan = { mapId: string; market: Market; you: Side; rivals: Side[]; exclude: Set<string>; subjects: { subjectId: string; entityId: string }[] };
 
 /** One category: ask every side, split the lists, save everything (and the reading) at once. */
 async function buildCategory(plan: Plan, category: Category) {
@@ -131,12 +131,70 @@ async function buildCategory(plan: Plan, category: Category) {
       })),
       skipDuplicates: true,
     }),
+    // Places also go on the globe, so each side's places keep their location and rank.
+    ...(category.kind === "DESTINATION"
+      ? [
+          prisma.geoSignal.deleteMany({ where: { mapId: plan.mapId, kind: "DESTINATION" } }),
+          prisma.geoSignal.createMany({
+            data: answers.flatMap((a) =>
+              a.entities.map((e, rank) => ({
+                mapId: plan.mapId,
+                subjectId: a.side.subjectId,
+                kind: "DESTINATION" as const,
+                entityId: e.id,
+                label: e.name,
+                value: e.affinity,
+                rank,
+                payload: { lat: e.location?.lat ?? null, lon: e.location?.lon ?? null, detail: e.detail },
+                evidenceId: a.evidence.id,
+              })),
+            ),
+          }),
+        ]
+      : []),
     prisma.mapReading.deleteMany({ where: { mapId: plan.mapId, category: category.kind } }),
     prisma.mapReading.create({ data: { mapId: plan.mapId, category: category.kind, text, evidence: { connect: answers.map((a) => ({ id: a.evidence.id })) } } }),
     prisma.cultureMap.update({ where: { id: plan.mapId }, data: { queryCount: { increment: answers.length } } }),
   ]);
   const done = await prisma.mapReading.count({ where: { mapId: plan.mapId } });
   await prisma.cultureMap.update({ where: { id: plan.mapId }, data: { categoriesDone: done } });
+}
+
+/** Who each brand reaches: one call per age band or gender scores every brand on the map. Saved in one go. */
+async function buildAudience(plan: Plan) {
+  const ids = [...new Set(plan.subjects.map((s) => s.entityId))];
+  const calls = await Promise.all(
+    SEGMENTS.map(async (segment) => {
+      const params = audienceParams(segment, ids);
+      const started = Date.now();
+      const body = await limited(() => qloo(INSIGHTS, params, TTL.insights, { timeoutMs: 60_000, tries: 3 }));
+      return { segment, scores: scoresIn(body, segment), evidence: { id: randomUUID(), params, key: cacheKey(INSIGHTS, params), ms: Date.now() - started, warnings: warningsOf(body) } };
+    }),
+  );
+  const keys = new Set((await prisma.qlooCache.findMany({ where: { key: { in: calls.map((c) => c.evidence.key) } }, select: { key: true } })).map((r) => r.key));
+  await prisma.$transaction([
+    prisma.audienceIndex.deleteMany({ where: { mapId: plan.mapId } }),
+    prisma.evidence.createMany({
+      data: calls.map((c) => ({
+        id: c.evidence.id,
+        path: INSIGHTS,
+        params: c.evidence.params,
+        cacheKey: keys.has(c.evidence.key) ? c.evidence.key : null,
+        status: c.evidence.warnings ? "WARNING" : "OK",
+        warnings: (c.evidence.warnings as Prisma.InputJsonArray | null) ?? undefined,
+        durationMs: c.evidence.ms,
+      })),
+    }),
+    prisma.audienceIndex.createMany({
+      data: calls.flatMap((c) =>
+        plan.subjects.map((s) => {
+          const score = c.scores.get(s.entityId) ?? { value: null, masked: false, lowConfidence: false };
+          return { mapId: plan.mapId, subjectId: s.subjectId, audience: c.segment.key, value: score.value, placeholderMasked: score.masked, lowConfidence: score.lowConfidence, evidenceId: c.evidence.id };
+        }),
+      ),
+    }),
+    prisma.cultureMap.update({ where: { id: plan.mapId }, data: { queryCount: { increment: calls.length } } }),
+  ]);
 }
 
 async function planFor(mapId: string) {
@@ -147,6 +205,7 @@ async function planFor(mapId: string) {
       workspace: { select: { name: true, slug: true } },
       subjects: { orderBy: { position: "asc" }, select: { id: true, role: true, entityId: true, entity: { select: { name: true } } } },
       readings: { select: { category: true } },
+      _count: { select: { audienceIndexes: true } },
     },
   });
   if (!map) return null;
@@ -161,8 +220,9 @@ async function planFor(mapId: string) {
     you: { subjectId: first.id, name: map.workspace.name, ids: youSubjects.map((s) => s.entityId) },
     rivals: map.subjects.filter((s) => s.role === "RIVAL").map((s) => ({ subjectId: s.id, name: s.entity.name, ids: [s.entityId] })),
     exclude: new Set(map.subjects.map((s) => s.entityId)),
+    subjects: map.subjects.map((s) => ({ subjectId: s.id, entityId: s.entityId })),
   };
-  return { map, plan, done: new Set(map.readings.map((r) => r.category as string)) };
+  return { map, plan, done: new Set(map.readings.map((r) => r.category as string)), audienceDone: map._count.audienceIndexes > 0 };
 }
 
 /** Ready: mark it once, then tell the person who started it. */
@@ -194,12 +254,13 @@ const buildMap: Handler<typeof jobSchema> = {
     try {
       const found = await planFor(mapId);
       if (!found || found.map.status === "READY") return Outcome.Skipped;
-      const { map, plan, done } = found;
+      const { map, plan, done, audienceDone } = found;
       await prisma.cultureMap.update({ where: { id: mapId }, data: { status: "BUILDING" } });
 
       const todo = CATEGORIES.filter((c) => !done.has(c.kind));
-      const results = await Promise.allSettled(todo.map((c) => buildCategory(plan, c)));
-      const failed = results.flatMap((r, i) => (r.status === "rejected" ? [{ category: todo[i]?.kind, error: r.reason as unknown }] : []));
+      const steps = [...todo.map((c) => ({ name: c.kind as string, run: () => buildCategory(plan, c) })), ...(audienceDone ? [] : [{ name: "AUDIENCE", run: () => buildAudience(plan) }])];
+      const results = await Promise.allSettled(steps.map((step) => step.run()));
+      const failed = results.flatMap((r, i) => (r.status === "rejected" ? [{ category: steps[i]?.name, error: r.reason as unknown }] : []));
       const first = failed[0];
       if (first) {
         logger.warn({ mapId, failed: failed.map((f) => f.category), attempt: envelope.attempt, ...errorDetails(first.error) }, "map build: categories failed");
@@ -207,7 +268,7 @@ const buildMap: Handler<typeof jobSchema> = {
         throw first.error instanceof Error ? first.error : new Error(String(first.error));
       }
       await finish(mapId, map.workspaceId, map.workspace, map.createdById);
-      logger.info({ mapId, categories: todo.length }, "map built");
+      logger.info({ mapId, steps: steps.length }, "map built");
       return Outcome.Processed;
     } catch (error) {
       if (error instanceof PermanentError) await prisma.cultureMap.update({ where: { id: mapId }, data: { status: "FAILED" } }).catch(() => undefined);

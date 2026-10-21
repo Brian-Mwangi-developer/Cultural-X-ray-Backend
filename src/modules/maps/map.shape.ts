@@ -36,7 +36,7 @@ export function insightsParams(category: Category, signalIds: string[], market: 
   return category.kind === "DESTINATION" ? { ...base, "filter.geocode.country_code": market } : { ...base, "signal.location.query": COUNTRY[market] };
 }
 
-export type Entity = { id: string; name: string; popularity: number | null; affinity: number; image: string | null; detail: string | null };
+export type Entity = { id: string; name: string; popularity: number | null; affinity: number; image: string | null; detail: string | null; location: { lat: number; lon: number } | null };
 
 type Raw = {
   entity_id?: string;
@@ -44,6 +44,7 @@ type Raw = {
   popularity?: number;
   disambiguation?: string;
   query?: { affinity?: number };
+  location?: { lat?: number; lon?: number };
   properties?: { image?: { url?: string }; geocode?: { admin1_region?: string; admin2_region?: string } };
 };
 
@@ -61,6 +62,7 @@ export function entitiesOf(body: unknown, exclude: Set<string>): Entity[] {
       affinity: typeof e.query?.affinity === "number" ? e.query.affinity : 0,
       image: e.properties?.image?.url ?? null,
       detail: geo ? [geo.admin2_region, geo.admin1_region].filter(Boolean).join(", ") || null : e.disambiguation || null,
+      location: typeof e.location?.lat === "number" && typeof e.location?.lon === "number" ? { lat: e.location.lat, lon: e.location.lon } : null,
     });
   }
   return out;
@@ -121,4 +123,51 @@ export function readingFor(category: Category, split: Split[], rivalName: (subje
   for (const s of contested) tally.set(s.rival!, (tally.get(s.rival!) ?? 0) + 1);
   const most = rivalName([...tally.entries()].sort((a, b) => b[1] - a[1])[0]![0]);
   return `${lead} ${contested.length} of these ${category.noun} are shared, most with ${most}.`;
+}
+
+/* ---------------------------------------------------------------- audience */
+
+/** Who a brand reaches. One call per segment scores every brand on the map at once. */
+export const SEGMENTS = [
+  { key: "age:24_and_younger", param: "signal.demographics.age", value: "24_and_younger", label: "Under 25" },
+  { key: "age:25_to_29", param: "signal.demographics.age", value: "25_to_29", label: "25–29" },
+  { key: "age:30_to_34", param: "signal.demographics.age", value: "30_to_34", label: "30–34" },
+  { key: "age:35_to_44", param: "signal.demographics.age", value: "35_to_44", label: "35–44" },
+  { key: "age:45_to_54", param: "signal.demographics.age", value: "45_to_54", label: "45–54" },
+  { key: "age:55_and_older", param: "signal.demographics.age", value: "55_and_older", label: "55 and over" },
+  { key: "gender:female", param: "signal.demographics.gender", value: "female", label: "Women" },
+  { key: "gender:male", param: "signal.demographics.gender", value: "male", label: "Men" },
+] as const;
+
+export type Segment = (typeof SEGMENTS)[number];
+
+/**
+ * No location signal here: with one, scores bunch near 1 and some brands drop out entirely
+ * (Häagen-Dazs vanished from a UK panel in the map-build lab).
+ */
+export const audienceParams = (segment: Segment, ids: string[]): Record<string, string | number> => ({
+  "filter.type": "urn:entity:brand",
+  "filter.results.entities": ids.join(","),
+  [segment.param]: segment.value,
+  take: Math.max(10, ids.length),
+});
+
+/** Qloo's fill values for "no data" (0.554054 and 0.76 recur across unrelated brands in every lab). */
+const FILLERS = [0.554054, 0.76];
+export const isFiller = (v: number) => FILLERS.some((f) => Math.abs(v - f) < 5e-6);
+
+export type Score = { value: number | null; masked: boolean; lowConfidence: boolean };
+
+/** One brand's score for one segment, with Qloo's traps handled. */
+export function scoreOf(segment: Segment, affinity: number | undefined): Score {
+  if (typeof affinity !== "number") return { value: null, masked: false, lowConfidence: false };
+  if (isFiller(affinity)) return { value: null, masked: true, lowConfidence: false };
+  // Older bands cluster at 0.55–0.66 when Qloo has little signal for them (brand lab).
+  const older = segment.value === "45_to_54" || segment.value === "55_and_older";
+  return { value: affinity, masked: false, lowConfidence: older && affinity >= 0.55 && affinity <= 0.66 };
+}
+
+export function scoresIn(body: unknown, segment: Segment): Map<string, Score> {
+  const list = ((body as { results?: { entities?: Raw[] } })?.results?.entities ?? []) as Raw[];
+  return new Map(list.filter((e) => e.entity_id).map((e) => [e.entity_id!, scoreOf(segment, e.query?.affinity)]));
 }
