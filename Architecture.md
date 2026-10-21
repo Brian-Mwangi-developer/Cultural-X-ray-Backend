@@ -7,7 +7,7 @@ This document is the map. Read the first two sections before changing anything; 
 ## 1. The rules that keep this simple
 
 1. **Two processes, one codebase.** `api` answers HTTP. `worker` runs background jobs. They never call each other; they talk through RabbitMQ.
-2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email already works this way; map builds and ad checks will too.
+2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email and website reads already work this way; map builds and ad checks will too. **One exception:** onboarding's search-as-you-type lookups call Qloo inside the request, because a person is waiting on each keystroke. They are cached, time-limited and rate-limited instead (section 13).
 3. **Every job is safe to run twice.** RabbitMQ delivers *at least once*. Handlers must be idempotent: check before you write, use upserts, key side effects by the job id.
 4. **Nothing fails silently.** A job either succeeds, is retried after a delay, or lands in the dead-letter queue with the reason attached. There is no fourth path.
 5. **A business owns its workspace; an agency is a connection to it.** Data a brand produces hangs off its workspace (`workspaceId`), never off an agency. See `prisma/schema.prisma` and `../design/data-model.html`.
@@ -103,6 +103,7 @@ Route handlers validate input with zod, call a service or Prisma, and return JSO
 | `xray.email` | `xray.email.send` | `email.#` | 10 | 5 | 15 s | yes |
 | `xray.jobs` | `xray.map.build` | `map.build` | 2 | 3 | 30 s | not yet (messages wait, never dropped) |
 | `xray.jobs` | `xray.ad.check` | `ad.check` | 1 | 3 | 60 s | not yet |
+| `xray.jobs` | `xray.site.read` | `site.read` | 4 | 2 | 2 s | yes (Firecrawl website reads, section 13) |
 | `xray.system` | `xray.system.diagnostics` | `system.#` | 5 | 2 | 0.5 s | yes |
 | `xray.dlx` (direct) | `xray.dead_letters` | one binding per source queue | — | — | — | inspected by ops endpoints |
 
@@ -180,6 +181,10 @@ Ad checks and map builds will follow exactly this pattern.
   - Every change writes an `audit_event` (`orgs/audit.ts`). Non-members get 404, never 403, so ids and slugs don't leak.
 - `BETTER_AUTH_URL` is the **web app's** origin, because browsers reach auth through the web app's `/api` proxy. Cookies stay first-party and the Google OAuth redirect URI is unchanged.
 - Protected routes use `requireAuth` and read the session with `sessionOf(req)`.
+- **One account per browser, never switched silently:**
+  - A confirmation link opened while *another* account is signed in doesn't sign anyone in. The `before` hook in `auth.ts` sends it to the web's `/switch-account`, which offers "Log out and continue as <link's address>" or "Stay". Better Auth would otherwise replace the session cookie without a word.
+  - The web sends `x-xray-user` (the user a page was rendered for) with every `/api/v1` call. `requireAuth` answers `409 SESSION_CHANGED` if the session now belongs to someone else, so a stale tab can't act as the wrong person. Its `SessionGuard` also checks on focus and asks for a reload.
+  - Claims and invitations are locked to their address on the server: wrong or unconfirmed email is a 403 (`CLAIM_WRONG_ACCOUNT`, `EMAIL_NOT_VERIFIED`; Better Auth checks the invitation's recipient). The web locks the email field on sign-up and log-in that come from an invite or claim, and offers "Log out and switch account" on a mismatch.
 
 | Endpoint | What it's for |
 |---|---|
@@ -218,6 +223,7 @@ Ad checks and map builds will follow exactly this pattern.
   - Locally, the app uses the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `backend/.env`. These **always** win over ambient machine credentials (for example a global `AWS_PROFILE`).
   - In production, leave them unset; the SDK's default chain uses the task or instance IAM role.
   - This app has its own IAM user, `cultural-xray-ses`, under path `/apps/cultural-xray/` in account 746050096605. Its single inline policy `cultural-xray-ses-send` allows `ses:SendEmail` / `ses:SendRawEmail` only as `*@platform.learnitpal.com` through that identity and its configuration set, plus read-only `ses:GetAccount` and `ses:GetEmailIdentity`. It shares nothing with other applications' IAM users. When this app gets its own sending domain, update that policy's resources and condition.
+- **Third-party keys:** `QLOO_API_KEY` (with `QLOO_BASE`) and `FIRECRAWL_API_KEY` live only in `backend/.env`; the web never sees them. Empty keys switch lookups off with a person-facing message.
 - **Internal endpoints:** `/metrics` needs `METRICS_TOKEN`; `/api/v1/ops/*` needs `OPS_TOKEN`. Both are compared in constant time.
 - **Logs:** pino redacts passwords, tokens, secrets, cookies and authorization headers.
 - **Network:** every container port binds to `127.0.0.1` only. Redis requires a password; RabbitMQ uses a dedicated user and vhost (`xray`).
@@ -257,6 +263,7 @@ pnpm stack status    # containers; also: pnpm stack logs <service>, pnpm stack d
 pnpm stack up app    # runs api and worker as containers (production-like)
 pnpm test            # integration tests against the running containers and the database
 pnpm check           # typecheck
+pnpm lookup:smoke    # onboarding lookups against live Qloo, through the cache
 ```
 
 Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus 9095, Grafana 3005. They avoid the defaults so other local stacks can run alongside.
@@ -276,6 +283,9 @@ Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus
 | The brand always owns its workspace; agencies connect | A client can leave an agency without losing anything; access is the brand's to grant |
 | Agency-created workspaces are held in trust, then claimed | Agencies can start work before the client signs up, without ever owning the client's data |
 | Confirm email before any session | Invites, claims and join-by-domain all trust the address, so it must be proven first |
+| Search-as-you-type calls Qloo in the request | A person waits on each keystroke; a queue would add seconds. Two-level cache, single flight and timeouts keep it cheap and bounded |
+| Website reads go on a queue | Firecrawl takes 5–20 s; the web polls a job instead of holding a request open |
+| Only resolved Qloo ids are saved | A map built on a name Qloo doesn't know would silently drop that brand |
 
 Done:
 - The web app's auth and session reads moved here. The web proxies `/api/auth/*` and `/api/v1/*` (except `/api/v1/ops/*`) to this backend and holds no database or auth secrets.
@@ -286,3 +296,79 @@ Open:
 - Billing, Qloo usage metering, maps, briefs and ad checks: the web shows sample data for these until the engine lands.
 - Connection writes make several sequential round trips to Neon (about 7 s from Nairobi). Batch them or move the database closer before launch.
 - Alert delivery (Alertmanager, Slack or email) and production deployment target.
+- Onboarding lookups don't count against a workspace's Qloo quota yet; decide before metering lands.
+- The agency "add client" flow still takes a name only; it should reuse the brand search.
+
+---
+
+## 13. Lookups: finding brands, shops and rivals (`src/modules/lookup`)
+
+Onboarding asks Qloo who a business is, what category it's in and who it competes with, instead of using hard-coded lists. Evidence for every rule below: `../research-onboarding-lookup.md` and `../test/onboarding-lookup/`.
+
+### 13.1 Files
+
+| File | Does |
+|---|---|
+| `cache.ts` | The two-level cache (13.3) and its TTLs |
+| `qloo.client.ts` | `qloo(path, params, ttl)`: a cached GET with the API key, a 12 s timeout and up to 3 tries on 429/5xx. Failures become a person-facing 502 |
+| `qloo.shape.ts` | Reading records: name matching, categories, markets, cards. Pure functions, unit-tested in `tests/lookup.test.ts` |
+| `lookup.service.ts` | Searches, suggestions, categories, big brands; remembers shown entities as `QlooEntity` rows |
+| `site.ts` | Website reads through Firecrawl, as a queued job |
+| `lookup.routes.ts` | The endpoints (13.2) and `POST /orgs/:id/brand-setup` |
+
+### 13.2 Endpoints (all need a session; rate limit 150 per person per minute, failing open without Redis)
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/lookup/brands?q=` | Up to 6 brand cards (exact match first): name, categories, markets, description, logo |
+| `GET /api/v1/lookup/localities?q=&market=GB\|US` | Towns in that country. The query is sent as "Brighton, United Kingdom", because a bare "Brighton" ranks five US and Australian towns first |
+| `GET /api/v1/lookup/places?q=&lat=&lon=` | Up to 6 shops, cafés or restaurants within 15 miles: address, genres, rating |
+| `GET /api/v1/lookup/entities/:id/suggestions?kind=brand\|place&market=` | `{ categories, rivals[], seeds[] }`, each suggestion `ok`, `other_market` or `not_found` |
+| `GET /api/v1/lookup/categories?q=` | Up to 4 product categories for plain words (`/v2/tags` with `feature.semantic_search=true`; without it Qloo returns nothing) |
+| `GET /api/v1/lookup/category-brands?tag=&market=` | Best-known brands in a category that sell in the market; falls back to any market when fewer than 3, and says which (`scope`) |
+| `POST /api/v1/lookup/site { url }` → `GET /api/v1/lookup/site/:jobId` | A website read: `pending`, then `done` with name, what it sells, product types, where based, or `failed` with a message |
+| `POST /api/v1/orgs/:id/brand-setup` | Saves onboarding's picks into `organization.metadata` (intent version 2), `markets` and `brandEntityId`. Managers only. Every Qloo id must resolve (fetched and stored if a background write hasn't landed). With `complete: true`, a brand Qloo doesn't know needs at least one read-through brand |
+
+### 13.3 Cache strategy
+
+Every Qloo and Firecrawl answer goes through `cached(path, params, ttl, load)`:
+
+1. **Key:** `lk:v1:` plus the SHA-256 of the path and the params sorted by name, so parameter order never splits the cache.
+2. **Redis first.** A hit returns in about a millisecond.
+3. **Postgres next** (`qloo_cache` table: key, path, params, response, `expiresAt`). A hit that hasn't expired refills Redis for its remaining lifetime, so answers survive Redis restarts and are shared by api and worker.
+4. **Then the source.** The answer is written to both levels. Only successful answers are stored; **empty results are stored too**, because "not found" is an answer and the same typo shouldn't cost a call twice. Errors are never cached.
+5. **Single flight.** Identical calls in flight in the same process share one promise, so a burst of keystrokes or two tabs make one Qloo call.
+6. **Failures don't block.** If Redis is down, reads and writes skip it; if a Postgres write fails, it's logged and the answer is still returned.
+
+| What | TTL | Why |
+|---|---|---|
+| Brand search (`/search`, brands) | 7 days | Brand records change slowly |
+| Place search | 3 days | Opening hours and closures change faster |
+| Localities | 90 days | Towns don't move |
+| Entity records (`/entities`) | 14 days | Read again when suggestions are built |
+| Insights (suggestions, big brands, nearby places) | 7 days | Taste data moves slowly |
+| Category matching (`/v2/tags`) | 30 days | Qloo's tag list is stable |
+| Website reads (Firecrawl, keyed by domain) | 30 days | One read per brand per month; credits are paid |
+
+**Stored entities.** Every brand or place shown to a person is also upserted as a `QlooEntity` (name, kind, logo, the card and its tags), in the background and at most every 6 hours per id per process. Neon writes are slow from far away, so lookups never wait on them. Saving a pick checks those rows and fetches any missing record from the cache, so saving rarely calls Qloo.
+
+Measured: a full onboarding run (searches, suggestions, towns, shops, categories, big brands) took 36 s cold and **1.2 s** warm (`pnpm lookup:smoke`).
+
+To clear the cache for one call, delete its `qloo_cache` row and Redis key (`lk:v1:*`); there's no admin endpoint yet.
+
+### 13.4 Rules for suggestions (from the lookup lab)
+
+- **Matching a name:** ignore case, accents and punctuation; then akas; then a prefix match of 4+ characters ("Dunkin'" → "Dunkin' Donuts").
+- **A rival must share a category** (product category, or a non-generic industry) with the brand it came from. Otherwise it's `not_found`: "Oppo Brothers" resolves to OPPO, a phone maker.
+- **Market:** a brand that lists markets but not the workspace's is `other_market` (set aside, still selectable). Vague markets ("Global", "International", "Europe") and no markets at all are never set aside.
+- **Never the brand itself** (Allbirds lists itself as a competitor).
+- **Shops:** rivals are taste-closest places of the same main genre within 5 km (`signal.interests.entities` plus `filter.location` POINT and radius), same main business first; read-through brands are the brands the shop's customers like, filtered to the market. Branches of the same shop are excluded.
+- **Categories:** `product_category`, else `industry` (restaurants and some big brands have no product category).
+
+### 13.5 Website reads (`site.ts`)
+
+- `normaliseSite` accepts only public http(s) hostnames: no IPs, `localhost`, `.local` or `.internal`.
+- `POST /lookup/site` answers from cache when it can; otherwise it stores a `pending` job in Redis (`site:job:<id>`, 1 hour) and publishes `site.read`.
+- The worker calls Firecrawl `/v1/scrape` with a JSON schema, caches the result per domain, and marks the job `done`.
+- DNS failures and blocked sites are permanent; a second failure of anything else gives up. Either way the job is marked `failed` with "We couldn't open that website…", and the handler acks rather than dead-lettering, because the person has already moved on.
+

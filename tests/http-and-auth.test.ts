@@ -10,6 +10,7 @@ import { startTestServer } from "./helpers";
 
 let server: Awaited<ReturnType<typeof startTestServer>>;
 const email = `test+${randomUUID().slice(0, 8)}@xray.test`;
+const otherEmail = `test+${randomUUID().slice(0, 8)}@xray.test`;
 const origin = config.http.webOrigins[0] ?? "http://localhost:3000";
 
 beforeAll(async () => {
@@ -20,6 +21,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await prisma.user.deleteMany({ where: { email: otherEmail } });
   const user = await prisma.user.findUnique({ where: { email }, include: { memberships: true } });
   if (user) {
     await prisma.organization.deleteMany({ where: { id: { in: user.memberships.map((m) => m.organizationId) } } });
@@ -159,5 +161,31 @@ describe("auth through Better Auth", () => {
   it("caches the session in Redis", async () => {
     const res = await fetch(`${server.url}/api/auth/get-session`, { headers: { cookie } });
     expect(((await res.json()) as { user: { email: string } }).user.email).toBe(email);
+  });
+
+  it("never switches accounts silently when a confirmation link is opened while signed in", async () => {
+    await post("/api/auth/sign-up/email", { name: "Other Person", email: otherEmail, password: "culture-map-2026" }, false);
+    const token = await createEmailVerificationToken(config.auth.secret, otherEmail);
+    const res = await fetch(`${server.url}/api/auth/verify-email?token=${token}&callbackURL=%2Fonboarding`, { headers: { cookie }, redirect: "manual" });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.pathname).toBe("/switch-account");
+    expect(location.searchParams.get("to")).toBe(otherEmail);
+    expect(location.searchParams.get("continue")).toMatch(/^\/api\/auth\/verify-email\?token=/);
+    expect(res.headers.getSetCookie().join(";")).not.toContain("session_token=");
+    expect((await prisma.user.findUnique({ where: { email: otherEmail } }))?.emailVerified).toBe(false);
+    // Signed out, the same link confirms and signs in as usual.
+    const fresh = await fetch(`${server.url}/api/auth/verify-email?token=${token}`, { redirect: "manual" });
+    expect(fresh.headers.getSetCookie().join(";")).toContain("session_token=");
+    expect((await prisma.user.findUnique({ where: { email: otherEmail } }))?.emailVerified).toBe(true);
+  });
+
+  it("refuses requests made for a user the session no longer belongs to", async () => {
+    const me = (await (await fetch(`${server.url}/api/auth/get-session`, { headers: { cookie } })).json()) as { user: { id: string } };
+    const stale = await fetch(`${server.url}/api/v1/me`, { headers: { cookie, "x-xray-user": "someone-else" } });
+    expect(stale.status).toBe(409);
+    expect(((await stale.json()) as { error: { code: string } }).error.code).toBe("SESSION_CHANGED");
+    const current = await fetch(`${server.url}/api/v1/me`, { headers: { cookie, "x-xray-user": me.user.id } });
+    expect(current.status).toBe(200);
   });
 });

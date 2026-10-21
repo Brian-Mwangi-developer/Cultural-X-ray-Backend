@@ -1,6 +1,6 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { organization } from "better-auth/plugins";
 import { config } from "@/config/env";
 import { prisma } from "@/infra/database";
@@ -11,6 +11,16 @@ import { newConnectCode } from "@/modules/orgs/connect-code";
 import { slugProblem } from "@/modules/orgs/slugs";
 
 const google = config.auth.google.clientId && config.auth.google.clientSecret ? { google: { ...config.auth.google } } : undefined;
+
+/** The address a confirmation link is for. The token is verified by Better Auth itself; this only reads it. */
+function emailInToken(token: unknown): string | null {
+  try {
+    const payload = JSON.parse(Buffer.from(String(token).split(".")[1] ?? "", "base64url").toString("utf8")) as { email?: string };
+    return payload.email ? payload.email.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
 
 export const auth = betterAuth({
   appName: "Cultural X-Ray",
@@ -60,6 +70,24 @@ export const auth = betterAuth({
     sendVerificationEmail: async ({ user, url }) => {
       await enqueueEmail({ template: "verify-email", to: user.email, name: user.name, url }, { priority: 9 });
     },
+  },
+
+  hooks: {
+    // Better Auth signs the link's owner in after confirming, replacing whoever is signed in
+    // without a word. If someone else is signed in, ask first: the web's /switch-account page
+    // offers "log out and continue as <link's address>" or "stay".
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/verify-email") return;
+      const linkEmail = emailInToken(ctx.query?.token);
+      if (!linkEmail) return;
+      const current = await getSessionFromCtx(ctx).catch(() => null);
+      if (!current || current.user.email.toLowerCase() === linkEmail) return;
+      const resume = `/api/auth/verify-email?${new URLSearchParams({ token: String(ctx.query?.token), ...(ctx.query?.callbackURL ? { callbackURL: String(ctx.query.callbackURL) } : {}) })}`;
+      const target = new URL("/switch-account", config.http.publicWebUrl);
+      target.searchParams.set("to", linkEmail);
+      target.searchParams.set("continue", resume);
+      throw ctx.redirect(target.toString());
+    }),
   },
 
   ...(google && { socialProviders: google }),
