@@ -42,6 +42,11 @@ const schema = z.object({
     .refine((value) => /^(?:[^<>]+<)?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?$/.test(value), "Use an address or 'Name <address>'"),
   EMAIL_REPLY_TO: z.union([z.email(), z.literal("")]).default(""),
   AWS_REGION: z.string().default("us-east-1"),
+
+  // Lookups during onboarding. Empty keys switch the feature off with a friendly message.
+  QLOO_API_KEY: z.string().default(""),
+  QLOO_BASE: z.url().default("https://hackathon.api.qloo.com"),
+  FIRECRAWL_API_KEY: z.string().default(""),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -102,6 +107,9 @@ export const config = {
     // development, an IAM role or AWS profile in production).
     aws: { region: env.AWS_REGION },
   },
+
+  qloo: { apiKey: env.QLOO_API_KEY, base: env.QLOO_BASE.replace(/\/+$/, "") },
+  firecrawl: { apiKey: env.FIRECRAWL_API_KEY },
 } as const;
 
 export type AppConfig = typeof config;
