@@ -40,6 +40,15 @@ export const QUEUES = {
     retryDelayMs: 60_000,
     maxPriority: 10,
   },
+  siteRead: {
+    name: "xray.site.read",
+    exchange: EXCHANGES.jobs.name,
+    bindings: ["site.read"],
+    prefetch: 4,
+    maxAttempts: 2,
+    retryDelayMs: 2_000,
+    maxPriority: 10,
+  },
   diagnostics: {
     name: "xray.system.diagnostics",
     exchange: EXCHANGES.system.name,

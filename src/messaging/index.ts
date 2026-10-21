@@ -7,6 +7,7 @@ import { assertTopology, QUEUES } from "@/messaging/topology";
 import type { HandlerMap, QueueSpec } from "@/messaging/types";
 import { emailHandlers } from "@/modules/email/email.queue";
 import { diagnosticHandlers } from "@/modules/ops/diagnostics.queue";
+import { siteHandlers } from "@/modules/lookup/site";
 
 /**
  * Queue → handlers. A queue that is declared but not listed here (map build, ad check)
@@ -15,6 +16,7 @@ import { diagnosticHandlers } from "@/modules/ops/diagnostics.queue";
 const CONSUMERS: Array<[QueueSpec, HandlerMap]> = [
   [QUEUES.email, emailHandlers],
   [QUEUES.diagnostics, diagnosticHandlers],
+  [QUEUES.siteRead, siteHandlers],
 ];
 
 async function declare(): Promise<void> {
