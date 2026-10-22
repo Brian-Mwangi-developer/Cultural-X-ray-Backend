@@ -265,6 +265,8 @@ pnpm test            # integration tests against the running containers and the 
 pnpm check           # typecheck
 pnpm lookup:smoke    # onboarding lookups against live Qloo, through the cache
 pnpm map:smoke <slug> [--rebuild]   # build a workspace's Culture Map through the real queue and print it
+# Ask X-Ray: ASK_PRACTICE=true streams scripted answers through the real tools at no cost;
+# ASK_MODEL / ASK_MAX_TOKENS / ASK_DAILY_LIMIT bound what a live key can spend.
 ```
 
 Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus 9095, Grafana 3005. They avoid the defaults so other local stacks can run alongside.
@@ -287,6 +289,8 @@ Host ports: api 4000, worker 4001, Redis 6390, RabbitMQ 5682 / 15682, Prometheus
 | Search-as-you-type calls Qloo in the request | A person waits on each keystroke; a queue would add seconds. Two-level cache, single flight and timeouts keep it cheap and bounded |
 | Website reads go on a queue | Firecrawl takes 5–20 s; the web polls a job instead of holding a request open |
 | Map builds on RabbitMQ, not a second job system (Inngest was considered) | The worker already has retries, dead letters and the outbox. Resuming a build comes from saving each category as it finishes, not from a workflow engine, so there's one less container (~80 MB image) to run and secure |
+| Ask X-Ray streams from the API, not a queue | A person is reading each word as it arrives; the answer is short (capped tokens, at most 5 steps) and the request is cancelled when they leave. Rule 2's other exception |
+| A practice model, not mocks in tests only | With little model credit, the whole chat (tools, pictures, saving, UI) must be testable for free. Practice mode runs the real tools and writes from their output |
 | Owners never see Qloo scores | Affinities bunch near 1 and lean percentages read as precision we don't have. The API returns labels and a 0–1 lean; the web turns them into words ("Only yours", "Shared with X · leans your way") |
 | Only resolved Qloo ids are saved | A map built on a name Qloo doesn't know would silently drop that brand |
 
@@ -417,4 +421,30 @@ Cost: 8 × (1 + rivals) + 8 calls, so 32 for two rivals. Measured: 44 s cold, ab
 - The build screen polls every 2 s and pauses while the tab is hidden.
 - The overview's headline, four columns and three plays come only from map items. Every claim is in plain words; no affinity or percentage is shown.
 - Audience & places (`/[org]/audience`) turns scores into words in `web/src/lib/audience.ts`: "Very strong" to "Weak", "thin data", "Not enough data", who leads each group compared with you, and places by rank ("Top pick for Jude's", "Not in Häagen-Dazs' top 20"). Scores only shade the cells and the globe. Maps built before the audience step offer a rebuild.
+
+---
+
+## 15. Ask X-Ray (`src/modules/ask`)
+
+The assistant inside the product. It answers from the workspace's own Culture Map, in plain words, and can draw a ranking, a chart or a table in the conversation.
+
+### 15.1 Files
+
+| File | Does |
+|---|---|
+| `ask.routes.ts` | `POST /orgs/:id/ask` streams an answer (AI SDK UI message stream; the thread id comes back in `X-Ask-Thread`). `GET /ask/status`, `GET/DELETE /orgs/:id/ask/threads[/:threadId]`. |
+| `ask.tools.ts` | `read_map` and `read_audience` give the model the map **in words** (holders, leans, positions, "strong"/"weak"; never scores). `show_ranking`, `show_chart`, `show_table` are pictures: the model's input is the picture, validated by zod, rendered by the web, each with a required `howToRead`. |
+| `ask.prompt.ts` | Short instructions: tools first, plain words, no scores, at most one picture. |
+| `ask.practice.ts` | Practice model (`ASK_PRACTICE=true`): costs nothing, still calls the real tools and draws from their output. |
+| `ask.service.ts` | Threads and messages (`ask_thread`, `ask_message`; `metadata` holds model and token counts per answer). |
+
+### 15.2 Rules
+
+- **Only the new question is sent;** the server loads the history. Every saved message gets a server id (ids from the browser are never used as keys).
+- **Spending is bounded:** `ASK_MODEL` (default `claude-sonnet-5-5`; dev uses `claude-haiku-5-5`), `ASK_MAX_TOKENS` per step, at most 5 steps, `ASK_DAILY_LIMIT` questions per person per day (Redis; practice is free). Token counts are saved on each answer.
+- **Model access:** `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` for a compatible endpoint (it must include `/v1`). With neither, the API answers 503 and the web says the assistant isn't connected.
+- **Errors in words:** out of credit, bad key, busy, wrong model and provider outages each get a plain message; the raw error is only logged.
+- **Fast first words:** independent reads run together, a new chat loads no history, the question is saved while the answer streams, and ready maps' read-outs are cached in Redis for a day (`map:view:*`, `map:audience:*`). Measured: first words in about 1.7 s on a warm cache (practice); a live Haiku answer with a ranking took about 10 s and 10.4k input / 1k output tokens.
+
+Open: agencies' Ask X-Ray (needs client map access); feedback sending (the web's form is built, Send says it isn't connected); thumbs up/down on answers.
 

@@ -47,6 +47,15 @@ const schema = z.object({
   QLOO_API_KEY: z.string().default(""),
   QLOO_BASE: z.url().default("https://hackathon.api.qloo.com"),
   FIRECRAWL_API_KEY: z.string().default(""),
+
+  // Ask X-Ray. A key or a compatible base URL; without either the assistant says it isn't connected.
+  // ASK_PRACTICE streams a scripted answer through the real tools, for building and testing at no cost.
+  ANTHROPIC_API_KEY: z.string().default(""),
+  ANTHROPIC_BASE_URL: z.union([z.url(), z.literal("")]).default(""),
+  ASK_MODEL: z.string().default("claude-sonnet-5-5"),
+  ASK_MAX_TOKENS: z.coerce.number().int().min(256).max(8192).default(1200),
+  ASK_PRACTICE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  ASK_DAILY_LIMIT: z.coerce.number().int().min(1).default(40),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -110,6 +119,14 @@ export const config = {
 
   qloo: { apiKey: env.QLOO_API_KEY, base: env.QLOO_BASE.replace(/\/+$/, "") },
   firecrawl: { apiKey: env.FIRECRAWL_API_KEY },
+  ask: {
+    apiKey: env.ANTHROPIC_API_KEY,
+    baseUrl: env.ANTHROPIC_BASE_URL || undefined,
+    model: env.ASK_MODEL,
+    maxTokens: env.ASK_MAX_TOKENS,
+    practice: env.ASK_PRACTICE,
+    dailyLimit: env.ASK_DAILY_LIMIT,
+  },
 } as const;
 
 export type AppConfig = typeof config;

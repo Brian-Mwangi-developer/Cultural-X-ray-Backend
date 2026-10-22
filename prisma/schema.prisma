@@ -870,6 +870,7 @@ model AskMessage {
   thread    AskThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
   role      MessageRole
   parts     Json
+  metadata  Json?
   createdAt DateTime    @default(now())
 
   @@index([threadId, createdAt])

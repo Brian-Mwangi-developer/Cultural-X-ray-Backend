@@ -7,13 +7,13 @@ import { MANAGER_ROLES, type RoleName } from "@/modules/auth/roles";
  * rather than "forbidden" so an org's existence never leaks through its id or slug.
  */
 export async function membershipOf(userId: string, where: { id: string } | { slug: string }) {
-  const organization = await prisma.organization.findUnique({ where, select: { id: true, kind: true, name: true, slug: true } });
-  if (!organization) throw new HttpError(404, "We couldn't find that workspace.", { code: "ORG_NOT_FOUND" });
-  const member = await prisma.member.findUnique({
-    where: { organizationId_userId: { organizationId: organization.id, userId } },
-    select: { id: true, role: true, allClients: true },
+  // One round trip: the membership with its organisation (the database is far from the API).
+  const found = await prisma.member.findFirst({
+    where: { userId, organization: where },
+    select: { id: true, role: true, allClients: true, organization: { select: { id: true, kind: true, name: true, slug: true } } },
   });
-  if (!member) throw new HttpError(404, "We couldn't find that workspace.", { code: "ORG_NOT_FOUND" });
+  if (!found) throw new HttpError(404, "We couldn't find that workspace.", { code: "ORG_NOT_FOUND" });
+  const { organization, ...member } = found;
   return { organization, member };
 }
 

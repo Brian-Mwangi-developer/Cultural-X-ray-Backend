@@ -1,4 +1,5 @@
 import { prisma } from "@/infra/database";
+import { redis } from "@/infra/redis";
 import { HttpError } from "@/http/errors";
 import { publish } from "@/messaging/publisher";
 import { EXCHANGES } from "@/messaging/topology";
@@ -74,11 +75,31 @@ export async function startBuild(workspaceId: string, userId: string, { rebuild 
 
 type Item = { id: string; name: string; image: string | null; detail: string | null; label: "YOURS" | "CONTESTED" | "THEIRS"; lean: number | null; rival: string | null };
 
+/**
+ * A ready map never changes, so its read-outs are cached in Redis for a day: Ask X-Ray reads the
+ * map on most questions, and each uncached read is several slow round trips to the database.
+ */
+const VIEW_TTL = 86_400;
+async function cachedView<T>(key: string, build: () => Promise<T>): Promise<T> {
+  if (redis.status === "ready") {
+    const hit = await redis.get(key).catch(() => null);
+    if (hit) return JSON.parse(hit) as T;
+  }
+  const value = await build();
+  if (redis.status === "ready") await redis.set(key, JSON.stringify(value), "EX", VIEW_TTL).catch(() => undefined);
+  return value;
+}
+
 /** The workspace's latest map as the overview and build screens show it, or null. */
 export async function latestMap(workspaceId: string, perCategory = 8) {
-  const map = await prisma.cultureMap.findFirst({
-    where: { workspaceId },
-    orderBy: { createdAt: "desc" },
+  const head = await prisma.cultureMap.findFirst({ where: { workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true, status: true } });
+  if (!head) return null;
+  return head.status === "READY" ? cachedView(`map:view:${head.id}:${perCategory}`, () => mapView(head.id, perCategory)) : mapView(head.id, perCategory);
+}
+
+async function mapView(mapId: string, perCategory: number) {
+  const map = await prisma.cultureMap.findUnique({
+    where: { id: mapId },
     select: {
       id: true, status: true, market: true, categoriesDone: true, categoriesTotal: true, queryCount: true, thinData: true, builtAt: true, createdAt: true,
       subjects: { orderBy: { position: "asc" }, select: { id: true, role: true, entityId: true, entity: { select: { name: true, imageUrl: true } } } },
@@ -150,9 +171,13 @@ type Cell = { value: number | null; masked: boolean; lowConfidence: boolean };
  * Scores go to the web only to shade cells; the page puts them into words.
  */
 export async function audienceOf(workspaceId: string) {
-  const map = await prisma.cultureMap.findFirst({
-    where: { workspaceId, status: "READY" },
-    orderBy: { createdAt: "desc" },
+  const head = await prisma.cultureMap.findFirst({ where: { workspaceId, status: "READY" }, orderBy: { createdAt: "desc" }, select: { id: true } });
+  return head ? cachedView(`map:audience:${head.id}`, () => audienceView(head.id)) : null;
+}
+
+async function audienceView(mapId: string) {
+  const map = await prisma.cultureMap.findUnique({
+    where: { id: mapId },
     select: {
       id: true, market: true, builtAt: true, queryCount: true,
       subjects: { orderBy: { position: "asc" }, select: { id: true, role: true, entity: { select: { name: true } } } },
@@ -200,7 +225,7 @@ export async function audienceOf(workspaceId: string) {
       { key: "you", name: self ? self.entity.name : seeds.map((s) => s.entity.name).join(" and "), readThrough: !self },
       ...rivals.map((r) => ({ key: r.id, name: r.entity.name, readThrough: false })),
     ],
-    segments: SEGMENTS.map((s) => ({ key: s.key, label: s.label, cells: { you: yoursOf(s.key), ...Object.fromEntries(rivals.map((r) => [r.id, cellOf(r.id, s.key)])) } })),
+    segments: SEGMENTS.map((s) => ({ key: s.key, label: s.label, cells: { you: yoursOf(s.key), ...Object.fromEntries(rivals.map((r) => [r.id, cellOf(r.id, s.key)])) } as Record<string, Cell> })),
     places: [...places.values()],
   };
 }
