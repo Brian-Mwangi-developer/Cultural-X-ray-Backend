@@ -9,9 +9,11 @@ import { emailHandlers } from "@/modules/email/email.queue";
 import { diagnosticHandlers } from "@/modules/ops/diagnostics.queue";
 import { siteHandlers } from "@/modules/lookup/site";
 import { mapHandlers } from "@/modules/maps/map.build";
+import { adCheckHandlers } from "@/modules/adcheck/adcheck.queue";
+import { startVideoSweep, stopVideoSweep } from "@/modules/adcheck/adcheck.service";
 
 /**
- * Queue → handlers. A queue that is declared but not listed here (ad check)
+ * Queue → handlers. A queue that is declared but not listed here
  * keeps its messages until a handler ships; nothing is consumed and silently dropped.
  */
 const CONSUMERS: Array<[QueueSpec, HandlerMap]> = [
@@ -19,6 +21,7 @@ const CONSUMERS: Array<[QueueSpec, HandlerMap]> = [
   [QUEUES.diagnostics, diagnosticHandlers],
   [QUEUES.siteRead, siteHandlers],
   [QUEUES.mapBuild, mapHandlers],
+  [QUEUES.adCheck, adCheckHandlers],
 ];
 
 async function declare(): Promise<void> {
@@ -43,12 +46,14 @@ export async function startWorkerSide(): Promise<void> {
   await startAll();
   rabbitmq.whenReconnected(startAll);
   startDepthSampler();
+  startVideoSweep();
   logger.info({ consumers: CONSUMERS.map(([q]) => q.name) }, "workers listening");
 }
 
 export async function stopMessaging(): Promise<void> {
   stopDepthSampler();
   stopOutboxDrain();
+  stopVideoSweep();
   await stopConsumers();
   await rabbitmq.close();
 }

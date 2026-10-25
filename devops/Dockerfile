@@ -16,6 +16,8 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts
 
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
+# ffmpeg normalises uploaded ads and finds their shots (ad check worker).
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist

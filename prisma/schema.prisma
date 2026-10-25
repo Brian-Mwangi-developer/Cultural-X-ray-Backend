@@ -159,10 +159,20 @@ enum AdSource {
 }
 
 enum AdStatus {
+  UPLOADING
   UPLOADED
+  QUEUED
+  READING
   PROCESSING
   READY
   FAILED
+}
+
+enum RecutKind {
+  RECOMMENDED
+  SHORTEST
+  BOLDEST
+  CUSTOM
 }
 
 enum ElementKind {
@@ -238,6 +248,8 @@ model User {
   mapsCreated        CultureMap[]
   briefsWritten      Brief[]
   adsUploaded        Ad[]
+  recuts             Recut[]
+  aiCalls            AiCall[]
   threads            AskThread[]
   notifications      Notification[]
   pins               Pin[]
@@ -346,6 +358,7 @@ model Organization {
   briefs            Brief[]          @relation("BriefWorkspace")
   briefsAuthored    Brief[]          @relation("BriefAuthorOrg")
   ads               Ad[]
+  aiCalls           AiCall[]
   threads           AskThread[]
   notifications     Notification[]
   pins              Pin[]
@@ -793,12 +806,23 @@ model Ad {
   competitorEntityId String?
   competitorEntity   QlooEntity?  @relation(fields: [competitorEntityId], references: [id], onDelete: SetNull)
   storageKey         String
+  fileName           String?
+  sizeBytes          Int?
+  width              Int?
+  height             Int?
   durationMs         Int?
   status             AdStatus     @default(UPLOADED)
+  stage              String?
+  failureReason      String?
+  rivals             Json?
+  placements         String[]
   uploadedById       String?
   uploadedBy         User?        @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
   createdAt          DateTime     @default(now())
+  readAt             DateTime?
+  videoDeletedAt     DateTime?
   elements           AdElement[]
+  shots              AdShot[]
   checks             AdCheck[]
 
   @@index([workspaceId, createdAt])
@@ -811,10 +835,11 @@ model AdElement {
   ad         Ad          @relation(fields: [adId], references: [id], onDelete: Cascade)
   kind       ElementKind
   raw        String
+  detail     Json?
   startMs    Int
   endMs      Int
-  salience   Float
-  confidence Float
+  salience   Float       @default(0)
+  confidence Float       @default(1)
   entityId   String?
   entity     QlooEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
   tagId      String?
@@ -831,18 +856,73 @@ model AdCheck {
   ad           Ad         @relation(fields: [adId], references: [id], onDelete: Cascade)
   mapId        String
   map          CultureMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
-  yoursPct     Float
-  contestedPct Float
-  theirsPct    Float
-  offMapPct    Float
+  verdict      Json
   rightsFlag   RightsFlag @default(NONE)
   rightsDetail String?
-  blame        Json
-  fixes        Json
   createdAt    DateTime   @default(now())
+  recuts       Recut[]
 
   @@index([adId])
   @@map("ad_check")
+}
+
+model AdShot {
+  id          String     @id @default(cuid())
+  adId        String
+  ad          Ad         @relation(fields: [adId], references: [id], onDelete: Cascade)
+  index       Int
+  startMs     Int
+  endMs       Int
+  description Json?
+  territory   Territory?
+  evidence    Json?
+
+  @@unique([adId, index])
+  @@map("ad_shot")
+}
+
+model Recut {
+  id          String    @id @default(cuid())
+  adCheckId   String
+  adCheck     AdCheck   @relation(fields: [adCheckId], references: [id], onDelete: Cascade)
+  kind        RecutKind
+  editList    Json
+  verdict     Json?
+  parentId    String?
+  createdById String?
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+
+  @@index([adCheckId, createdAt])
+  @@map("recut")
+}
+
+/// One paid (or practice) call to an AI or data provider, costed and attributed, so spend per person,
+/// workspace and model can be monitored and priced. adId is kept as a plain id: cost history outlives
+/// a deleted ad.
+model AiCall {
+  id            String        @id @default(cuid())
+  provider      String
+  model         String
+  stage         String
+  feature       UsageKind
+  userId        String?
+  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  workspaceId   String?
+  workspace     Organization? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  adId          String?
+  inputTokens   Int           @default(0)
+  outputTokens  Int           @default(0)
+  thoughtTokens Int           @default(0)
+  costMicros    Int?
+  durationMs    Int
+  outcome       String
+  createdAt     DateTime      @default(now())
+
+  @@index([userId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([createdAt])
+  @@map("ai_call")
 }
 
 model AskThread {

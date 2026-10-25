@@ -56,6 +56,23 @@ const schema = z.object({
   ASK_MAX_TOKENS: z.coerce.number().int().min(256).max(8192).default(1200),
   ASK_PRACTICE: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   ASK_DAILY_LIMIT: z.coerce.number().int().min(1).default(40),
+
+  // Ad check. Uploads go to Vercel Blob (private by default): the browser uploads with a short-lived
+  // client token; only the backend reads the file. Without a token, ad checks say they aren't set up.
+  BLOB_READ_WRITE_TOKEN: z.string().default(""),
+  BLOB_ACCESS: z.enum(["private", "public"]).default("private"),
+  ADCHECK_MAX_SECONDS: z.coerce.number().int().min(5).max(600).default(60),
+  ADCHECK_MAX_BYTES: z.coerce.number().int().min(1_000_000).default(1_000_000_000),
+  ADCHECK_KEEP_DAYS: z.coerce.number().int().min(1).default(14),
+
+  // Gemini on Vertex AI. "practice" returns scripted, schema-valid answers at no cost; "off" disables reading.
+  // Auth: a Vertex API key bound to a service account when set, otherwise Google application credentials.
+  GEMINI_PROVIDER: z.enum(["vertex", "practice", "off"]).default("off"),
+  GOOGLE_CLOUD_PROJECT: z.string().default(""),
+  GOOGLE_CLOUD_LOCATION: z.string().default("global"),
+  GOOGLE_VERTEX_API_KEY: z.string().default(""),
+  GEMINI_MODEL_FAST: z.string().default("gemini-3.5-flash-lite"),
+  GEMINI_MODEL_SMART: z.string().default("gemini-3.8-flash"),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -126,6 +143,15 @@ export const config = {
     maxTokens: env.ASK_MAX_TOKENS,
     practice: env.ASK_PRACTICE,
     dailyLimit: env.ASK_DAILY_LIMIT,
+  },
+  blob: { token: env.BLOB_READ_WRITE_TOKEN, access: env.BLOB_ACCESS },
+  adCheck: { maxSeconds: env.ADCHECK_MAX_SECONDS, maxBytes: env.ADCHECK_MAX_BYTES, keepDays: env.ADCHECK_KEEP_DAYS },
+  gemini: {
+    provider: env.GEMINI_PROVIDER,
+    project: env.GOOGLE_CLOUD_PROJECT,
+    location: env.GOOGLE_CLOUD_LOCATION,
+    apiKey: env.GOOGLE_VERTEX_API_KEY,
+    models: { fast: env.GEMINI_MODEL_FAST, smart: env.GEMINI_MODEL_SMART },
   },
 } as const;
 

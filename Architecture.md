@@ -7,7 +7,7 @@ This document is the map. Read the first two sections before changing anything; 
 ## 1. The rules that keep this simple
 
 1. **Two processes, one codebase.** `api` answers HTTP. `worker` runs background jobs. They never call each other; they talk through RabbitMQ.
-2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email, website reads and Culture Map builds work this way; ad checks will too. **One exception:** onboarding's search-as-you-type lookups call Qloo inside the request, because a person is waiting on each keystroke. They are cached, time-limited and rate-limited instead (section 13).
+2. **Slow or fallible work goes on a queue.** If it calls a third party (SES, Qloo, a video model) or can take more than a second, the API publishes a job and returns. Email, website reads, Culture Map builds and ad checks work this way. **One exception:** onboarding's search-as-you-type lookups call Qloo inside the request, because a person is waiting on each keystroke. They are cached, time-limited and rate-limited instead (section 13).
 3. **Every job is safe to run twice.** RabbitMQ delivers *at least once*. Handlers must be idempotent: check before you write, use upserts, key side effects by the job id.
 4. **Nothing fails silently.** A job either succeeds, is retried after a delay, or lands in the dead-letter queue with the reason attached. There is no fourth path.
 5. **A business owns its workspace; an agency is a connection to it.** Data a brand produces hangs off its workspace (`workspaceId`), never off an agency. See `prisma/schema.prisma` and `../design/data-model.html`.
@@ -102,7 +102,7 @@ Route handlers validate input with zod, call a service or Prisma, and return JSO
 |---|---|---|---|---|---|---|
 | `xray.email` | `xray.email.send` | `email.#` | 10 | 5 | 15 s | yes |
 | `xray.jobs` | `xray.map.build` | `map.build` | 2 | 3 | 30 s | yes (Culture Map builds, section 14) |
-| `xray.jobs` | `xray.ad.check` | `ad.check` | 1 | 3 | 60 s | not yet |
+| `xray.jobs` | `xray.ad.check` | `ad.check` | 1 | 3 | 60 s | yes (ad checks, section 16) |
 | `xray.jobs` | `xray.site.read` | `site.read` | 4 | 2 | 2 s | yes (Firecrawl website reads, section 13) |
 | `xray.system` | `xray.system.diagnostics` | `system.#` | 5 | 2 | 0.5 s | yes |
 | `xray.dlx` (direct) | `xray.dead_letters` | one binding per source queue | — | — | — | inspected by ops endpoints |
@@ -145,7 +145,7 @@ Every dead letter carries headers: source queue, reason, error message and name,
 5. Add a test in `tests/` (happy path plus one failure).
 6. If it matters operationally, add an alert in `devops/prometheus/alerts.yml`.
 
-Map builds follow this pattern (section 14); ad checks will too.
+Map builds (section 14) and ad checks (section 16) follow this pattern.
 
 ---
 
@@ -447,4 +447,52 @@ The assistant inside the product. It answers from the workspace's own Culture Ma
 - **Fast first words:** independent reads run together, a new chat loads no history, the question is saved while the answer streams, and ready maps' read-outs are cached in Redis for a day (`map:view:*`, `map:audience:*`). Measured: first words in about 1.7 s on a warm cache (practice); a live Haiku answer with a ranking took about 10 s and 10.4k input / 1k output tokens.
 
 Open: agencies' Ask X-Ray (needs client map access); feedback sending (the web's form is built, Send says it isn't connected); thumbs up/down on answers.
+
+## 16. Ad check (`src/modules/adcheck`, `src/modules/gemini`, `src/modules/usage`)
+
+Someone uploads a draft ad; the worker reads what's seen and heard in it with Gemini on Vertex AI. Spec: `../spec-ad-check-recut.md`; plan and progress: `../plan-ad-check.md`. Placing it on the map, the verdict and the re-cuts come next (plan phases 2–4).
+
+### 16.1 Files
+
+| File | Does |
+|---|---|
+| `adcheck.routes.ts` | Endpoints below. Owners, admins and strategists create and delete; any member reads and plays. |
+| `adcheck.service.ts` | Create (with an upload token), start, list, detail, delete video, delete check; the hourly sweep in the worker. |
+| `storage.ts` | Vercel Blob: one-path client upload tokens, `head`, download, ranged streaming, delete. |
+| `adcheck.video.ts` | ffmpeg: probe, normalise (H.264 + AAC, ≤720p, ~2 Mbps, ≤30 fps), scene cuts (`scene > 0.3`). |
+| `adcheck.shape.ts` | Pure: zod schemas per Gemini pass, prompts, the people rule, practice answers, shot cleaning, answers → `ad_element` rows. |
+| `adcheck.queue.ts` | The `ad.check` handler. |
+| `gemini/gemini.client.ts` | Vertex `generateContent` with structured output; retries; refusals; practice and off. |
+| `usage/pricing.ts`, `usage/ai-calls.ts` | Dated price table and `costMicros`; `recordCall` writes `ai_call`. |
+
+### 16.2 Endpoints (all under `/api/v1`, need a session)
+
+| Endpoint | Does |
+|---|---|
+| `POST /orgs/:id/ads` `{ fileName, sizeBytes, contentType }` | Creates the ad (`UPLOADING`); returns `{ adId, pathname, clientToken, access, maxSeconds }`. The browser uploads with `put(pathname, file, { access, token: clientToken })` from `@vercel/blob/client`. |
+| `POST /orgs/:id/ads/:adId/start` `{ pathname?, rivals, placements }` | Checks the file arrived (`pathname` is what `put` returned; it must stay inside the path handed out), sets `QUEUED`, publishes `ad.check` (202). Retries a `FAILED` check. |
+| `GET /orgs/:id/ads`, `GET /orgs/:id/ads/:adId` | List; one ad with status, `stage` (plain words), shots with descriptions, elements. |
+| `GET /orgs/:id/ads/:adId/video` | Streams the video through the backend, honouring `Range` (206). 410 once deleted. |
+| `DELETE /orgs/:id/ads/:adId/video` | Deletes the file from Blob; the reading stays (`hasVideo: false`). |
+| `DELETE /orgs/:id/ads/:adId` | Deletes the file and everything read from it. |
+
+### 16.3 What the worker does
+
+Download → normalise → shots (saved) → three whole-ad passes on the **fast** model in parallel (context; on-screen text at high resolution; script, music and sounds) → one call per shot on the **smart** model, clipped with `videoMetadata`, at most 4 at once → elements saved → `READY`. Each shot's description is saved as it arrives, so a retry only repeats the cheap whole-ad passes. One Redis lock per ad; a second delivery is skipped.
+
+| Failure | Result |
+|---|---|
+| Gemini refuses (403 policy, blocked prompt, safety stop) | `PolicyRefusal`, never retried: `FAILED`, "We couldn't read this ad.", logged for review |
+| `GEMINI_PROVIDER=off`, no project or no credentials | `GeminiUnavailable`: `FAILED`, "Ad reading isn't set up yet." |
+| Over `ADCHECK_MAX_SECONDS`, unreadable file, upload missing | `FAILED` with a plain reason, no retry |
+| 429, 5xx, timeouts | Retried 3× in the client (2 s, 8 s, ~20 s or `Retry-After`), then by the queue; `FAILED` "Try again" after the last attempt |
+
+### 16.4 Rules
+
+- **The people rule is in every prompt that sees or hears people:** role and action only; never age, body, face, skin, ethnicity or looks; never identify anyone from their face. A test checks no prompt asks for any of it. (A per-shot request about children got the Vertex project blocked on 25 October 2026.)
+- **Schemas:** one zod schema per pass is both the JSON schema sent to Gemini and the check on its answer. Fixed values are one-value enums (Vertex has no `const`); arrays stay at 40 or fewer.
+- **Models per stage:** `GEMINI_MODEL_FAST` (Gemini 3.5 Flash-Lite) for the whole-ad passes, `GEMINI_MODEL_SMART` (Gemini 3.8 Flash) for shots. Flash-Lite hasn't been scored on the golden set yet (plan phase 2).
+- **Every call is costed:** `ai_call` holds provider, model, stage, feature, person, workspace, ad, tokens in/out/thinking, cost in micro-dollars (from `pricing.ts`, dated rows, global region, thinking billed as output), duration and outcome. Refusals and errors are recorded too. Practice calls are recorded at cost 0. A failed write is logged and never fails the job.
+- **Storage:** with `BLOB_ACCESS=private` (needs a private Blob store) only the backend can read files. On a public store, set `BLOB_ACCESS=public`: uploads get a random suffix so URLs can't be guessed, and playback still goes through the backend. Videos are deleted `ADCHECK_KEEP_DAYS` (14) after upload by the worker's hourly sweep; uploads never started are removed after a day.
+- **Practice:** `GEMINI_PROVIDER=practice` returns scripted, schema-checked answers at no cost; the tests run the whole flow this way against real Blob storage.
 
