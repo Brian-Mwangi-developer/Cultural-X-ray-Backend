@@ -2,7 +2,7 @@ import { config } from "@/config/env";
 import { HttpError } from "@/http/errors";
 import { prisma } from "@/infra/database";
 import { errorDetails, logger } from "@/observability/logger";
-import { enqueueAdCheck } from "@/modules/adcheck/adcheck.queue";
+import { enqueueAdCheck, enqueueRecut } from "@/modules/adcheck/adcheck.queue";
 import { describe, remove, storageReady, uploadedPath, uploadToken, VIDEO_TYPES, videoPath } from "@/modules/adcheck/storage";
 
 /** Ad checks for one workspace: create and upload, start reading, read back, delete. */
@@ -84,12 +84,25 @@ export async function adDetail(workspaceId: string, adId: string) {
       rivals: true,
       shots: { orderBy: { index: "asc" }, select: { index: true, startMs: true, endMs: true, description: true, territory: true } },
       elements: { orderBy: [{ startMs: "asc" }, { kind: "asc" }], select: { id: true, kind: true, raw: true, detail: true, startMs: true, endMs: true, territory: true } },
-      checks: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, mapId: true, verdict: true, createdAt: true } },
+      checks: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { id: true, mapId: true, verdict: true, createdAt: true, recuts: { where: { kind: { in: ["RECOMMENDED", "SHORTEST", "BOLDEST"] } }, orderBy: { kind: "asc" }, select: { id: true, kind: true, editList: true, verdict: true, createdAt: true } } },
+      },
     },
   });
   if (!ad) throw new HttpError(404, "We couldn't find that ad check.");
   const { _count, videoDeletedAt, checks, ...rest } = ad;
   return { ...rest, check: checks[0] ?? null, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt };
+}
+
+/** Ask the worker to (re)write the suggested re-cuts of a read ad. The ad's stage says so until they land. */
+export async function requestRecuts(workspaceId: string, adId: string, userId: string) {
+  const ad = await adOf(workspaceId, adId);
+  if (ad.status !== "READY") throw new HttpError(409, "The ad has to be read before it can be re-cut.", { code: "ADCHECK_NOT_READY" });
+  const published = await enqueueRecut(adId, workspaceId, userId);
+  if (!published.ok) throw new HttpError(503, "We couldn't start the re-cuts. Try again in a moment.", { code: "ADCHECK_QUEUE" });
+  await prisma.ad.update({ where: { id: adId }, data: { stage: "writing re-cuts" } });
 }
 
 /** Where the video is, for streaming. 410 once deleted. */

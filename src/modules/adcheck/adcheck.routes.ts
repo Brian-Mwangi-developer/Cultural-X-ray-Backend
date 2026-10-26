@@ -6,7 +6,7 @@ import { HttpError } from "@/http/errors";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
-import { adDetail, createAd, deleteAd, deleteVideo, listAds, PLACEMENTS, startAd, videoOf } from "@/modules/adcheck/adcheck.service";
+import { adDetail, createAd, deleteAd, deleteVideo, listAds, PLACEMENTS, requestRecuts, startAd, videoOf } from "@/modules/adcheck/adcheck.service";
 import { stream } from "@/modules/adcheck/storage";
 
 export const adCheckRouter = Router();
@@ -78,6 +78,19 @@ adCheckRouter.get("/orgs/:id/ads/:adId/video", requireAuth, async (req, res, nex
     req.on("close", () => body.destroy());
     body.on("error", (error) => (res.headersSent ? res.destroy(error) : next(error)));
     body.pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** (Re)write the suggested re-cuts in the worker (202); the detail shows them when they land. */
+adCheckRouter.post("/orgs/:id/ads/:adId/recuts", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization, member } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    requireRole(member.role, WRITERS, "re-cut ads");
+    await requestRecuts(organization.id, String(req.params.adId), user.id);
+    res.status(202).json({ ok: true });
   } catch (error) {
     next(error);
   }

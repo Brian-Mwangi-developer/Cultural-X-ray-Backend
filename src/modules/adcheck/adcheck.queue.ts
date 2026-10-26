@@ -11,6 +11,7 @@ import { type AdAudio, type AdContext, audioSchema, contextSchema, elementsFrom,
 import { comparisonFor, placeCues, placeReferences } from "@/modules/adcheck/adcheck.place";
 import { cuesPrompt, cuesSchema, noMapVerdict, type PlacedCue, practiceCues, shotTerritory, uniqueCues, type Verdict, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
 import { prepare } from "@/modules/adcheck/adcheck.video";
+import { fromShotNumbers, KINDS as RECUT_KINDS, practiceRecuts, readOfRecut, type RecutContext, recutPrompt, recutsSchema, type ShotContext, toEditList } from "@/modules/adcheck/recut";
 import { download } from "@/modules/adcheck/storage";
 import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
 import type { Attribution } from "@/modules/usage/ai-calls";
@@ -24,6 +25,8 @@ import type { Attribution } from "@/modules/usage/ai-calls";
  */
 
 export const AD_CHECK = "ad.check";
+/** Writes (or rewrites) the suggested re-cuts of an ad that has been read. */
+export const AD_RECUT = "ad.recut";
 const LOCK_SECONDS = 20 * 60;
 /** Shots described at once: keeps a 40-shot ad to about a minute without tripping Vertex's rate limit. */
 const IN_FLIGHT = 4;
@@ -32,6 +35,10 @@ const MIN_DESCRIBED_MS = 250;
 
 export async function enqueueAdCheck(adId: string, organizationId: string) {
   return publish(EXCHANGES.jobs.name, AD_CHECK, { adId }, { organizationId });
+}
+
+export async function enqueueRecut(adId: string, organizationId: string, userId: string) {
+  return publish(EXCHANGES.jobs.name, AD_RECUT, { adId, userId }, { organizationId });
 }
 
 const setStage = (adId: string, stage: Stage) => prisma.ad.update({ where: { id: adId }, data: { stage } });
@@ -122,6 +129,9 @@ async function read(adId: string, attempt: number) {
 
   await setStage(adId, "placing on your map");
   const verdict = await placeOnMap(adId, ad.workspaceId, ad.rivals, context.json, audio.json, shots, described, who);
+  // The re-cuts are a bonus on top of the read: if writing them fails, the check is still ready.
+  await setStage(adId, "writing re-cuts");
+  await writeRecuts(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "ad check: re-cuts not written"));
   await prisma.ad.update({ where: { id: adId }, data: { status: "READY", stage: "ready", readAt: new Date(), failureReason: null } });
   logger.info({ adId, shots: shots.length, described: described.size, elements: rows.length, lean: verdict.lean, attempt }, "ad read");
   return Outcome.Processed;
@@ -169,6 +179,83 @@ async function placeOnMap(adId: string, workspaceId: string, rivals: unknown, co
   return verdict;
 }
 
+/**
+ * Three suggested re-cuts (Recommended, Shortest, Boldest) from everything the check knows, as edit
+ * lists over the draft's own shots, each with where it would land. Replaces any earlier ones.
+ */
+export async function writeRecuts(adId: string, who: Attribution) {
+  const ad = await prisma.ad.findUnique({
+    where: { id: adId },
+    select: {
+      durationMs: true, placements: true, workspace: { select: { name: true } },
+      shots: { orderBy: { index: "asc" }, select: { index: true, startMs: true, endMs: true, description: true, territory: true, evidence: true } },
+      elements: { where: { kind: { in: ["ONSCREEN_TEXT", "SCRIPT", "SOUND"] } }, orderBy: { startMs: "asc" }, select: { kind: true, raw: true, detail: true, startMs: true, endMs: true } },
+      checks: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, verdict: true, map: { select: { subjects: { where: { role: "RIVAL" }, select: { entity: { select: { name: true } } } } } } } },
+    },
+  });
+  const check = ad?.checks[0];
+  if (!ad || !check || !ad.durationMs || !ad.shots.length) return 0;
+  const verdict = check.verdict as unknown as Verdict;
+  if (verdict.headline.startsWith("Build your Culture Map")) return 0; // nothing to steer toward without a map
+
+  const shots: ShotContext[] = ad.shots.map((sh) => ({
+    index: sh.index,
+    startMs: sh.startMs,
+    endMs: sh.endMs,
+    description: sh.description ? shotSchema.parse(sh.description) : null,
+    territory: sh.territory,
+    cues: ((sh.evidence as { cues?: { cue: string; territory: ShotContext["territory"]; rival: string | null; tag?: { name: string; type: string } | null }[] } | null)?.cues ?? []).map((q) => ({ cue: q.cue, territory: q.territory, rival: q.rival, tag: q.tag ? { name: q.tag.name, type: q.tag.type } : null })),
+  }));
+  const detail = (e: { detail: unknown }) => (e.detail ?? {}) as Record<string, unknown>;
+  const music = ad.elements.find((e) => e.kind === "SOUND" && detail(e).music === true);
+  const context: RecutContext = {
+    brand: ad.workspace.name,
+    rivals: check.map.subjects.map((x) => x.entity.name),
+    durationMs: ad.durationMs,
+    shots,
+    text: ad.elements.filter((e) => e.kind === "ONSCREEN_TEXT").map((e) => ({ text: e.raw, startMs: e.startMs, endMs: e.endMs })),
+    script: ad.elements.filter((e) => e.kind === "SCRIPT").map((e) => ({ words: e.raw, speaker: String(detail(e).speaker ?? "voice"), startMs: e.startMs, endMs: e.endMs })),
+    music: music ? [music.raw, detail(music).mood].filter(Boolean).join(", ") : null,
+    verdict,
+    placements: ad.placements,
+  };
+  const { json } = await generate({ stage: "recuts", tier: "smart", parts: [recutPrompt(context)], schema: recutsSchema, practice: practiceRecuts(context), attribution: who });
+
+  // One of each kind, in a fixed order; the first proposal of a kind wins.
+  const byKind = new Map(fromShotNumbers(json).recuts.map((r) => [r.kind, r] as const));
+  const rows = RECUT_KINDS.flatMap((kind) => {
+    const proposal = byKind.get(kind);
+    if (!proposal) return [];
+    const edit = toEditList(proposal, shots, ad.workspace.name);
+    return [{ adCheckId: check.id, kind, editList: edit as unknown as Prisma.InputJsonObject, verdict: readOfRecut(edit, shots) as unknown as Prisma.InputJsonObject, createdById: who.userId ?? null }];
+  });
+  await prisma.$transaction([prisma.recut.deleteMany({ where: { adCheckId: check.id, kind: { in: [...RECUT_KINDS] } } }), prisma.recut.createMany({ data: rows })]);
+  return rows.length;
+}
+
+const recutJob = z.object({ adId: z.string().min(1), userId: z.string().nullish() });
+
+const writeRecutsJob: Handler<typeof recutJob> = {
+  schema: recutJob,
+  async handle({ adId, userId }) {
+    const ad = await prisma.ad.findUnique({ where: { id: adId }, select: { workspaceId: true, status: true } });
+    if (!ad || ad.status !== "READY") return Outcome.Skipped;
+    try {
+      const n = await writeRecuts(adId, { feature: "AD_CHECK", userId: userId ?? null, workspaceId: ad.workspaceId, adId });
+      logger.info({ adId, recuts: n }, "re-cuts written");
+      return Outcome.Processed;
+    } catch (error) {
+      if (error instanceof PolicyRefusal || error instanceof GeminiRequestError || error instanceof GeminiUnavailable) {
+        logger.warn({ adId, ...errorDetails(error) }, "re-cuts: not written");
+        return Outcome.Skipped;
+      }
+      throw error;
+    } finally {
+      await prisma.ad.update({ where: { id: adId }, data: { stage: "ready" } }).catch(() => undefined);
+    }
+  },
+};
+
 /** One check per reading: a retry replaces it. */
 async function saveCheck(adId: string, mapId: string, verdict: Verdict) {
   await prisma.$transaction([prisma.adCheck.deleteMany({ where: { adId } }), prisma.adCheck.create({ data: { adId, mapId, verdict: verdict as unknown as Prisma.InputJsonObject } })]);
@@ -210,4 +297,4 @@ const checkAd: Handler<typeof jobSchema> = {
   },
 };
 
-export const adCheckHandlers: HandlerMap = { [AD_CHECK]: checkAd as Handler };
+export const adCheckHandlers: HandlerMap = { [AD_CHECK]: checkAd as Handler, [AD_RECUT]: writeRecutsJob as Handler };

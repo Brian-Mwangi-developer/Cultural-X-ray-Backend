@@ -449,7 +449,7 @@ Open: agencies' Ask X-Ray (needs client map access); feedback sending (the web's
 
 ## 16. Ad check (`src/modules/adcheck`, `src/modules/gemini`, `src/modules/usage`)
 
-Someone uploads a draft ad; the worker reads what's seen and heard in it with Gemini on Vertex AI. Spec: `../spec-ad-check-recut.md`; plan and progress: `../plan-ad-check.md`. It is then placed on the workspace's Culture Map and given a verdict in words. Re-cuts come next (plan phase 4).
+Someone uploads a draft ad; the worker reads what's seen and heard in it with Gemini on Vertex AI. Spec: `../spec-ad-check-recut.md`; plan and progress: `../plan-ad-check.md`. It is then placed on the workspace's Culture Map, given a verdict in words, and three suggested re-cuts are written from the same footage.
 
 ### 16.1 Files
 
@@ -462,7 +462,8 @@ Someone uploads a draft ad; the worker reads what's seen and heard in it with Ge
 | `adcheck.shape.ts` | Pure: zod schemas per Gemini pass, prompts, the people rule, practice answers, shot cleaning, answers → `ad_element` rows. |
 | `adcheck.verdict.ts` | Pure: cue schema and prompt, judging a tag from brand scores, picking the clearest tag, the verdict in words. |
 | `adcheck.place.ts` | Qloo: the map to compare with, cue → tags → brand scores, named references searched by kind and looked up on the map. |
-| `adcheck.queue.ts` | The `ad.check` handler. |
+| `recut.ts` | Pure: the re-cut schema and prompt, practice answers, Gemini's shot numbers → draft indexes, changes → edit list (`applyChanges`, Shortest held to 15 s), the proof each change rests on, the re-cut's read. `web/src/lib/recut.ts` mirrors `applyChanges` so a switch updates the preview at once. |
+| `adcheck.queue.ts` | The `ad.check` and `ad.recut` handlers. |
 | `gemini/gemini.client.ts` | Vertex `generateContent` with structured output; retries; refusals; practice and off. |
 | `usage/pricing.ts`, `usage/ai-calls.ts` | Dated price table and `costMicros`; `recordCall` writes `ai_call`. |
 
@@ -475,11 +476,12 @@ Someone uploads a draft ad; the worker reads what's seen and heard in it with Ge
 | `GET /orgs/:id/ads`, `GET /orgs/:id/ads/:adId` | List; one ad with status, `stage` (plain words), shots with descriptions, elements. |
 | `GET /orgs/:id/ads/:adId/video` | Streams the video through the backend, honouring `Range` (206). 410 once deleted. |
 | `DELETE /orgs/:id/ads/:adId/video` | Deletes the file from Blob; the reading stays (`hasVideo: false`). |
+| `POST /orgs/:id/ads/:adId/recuts` | Writes the re-cuts again (`ad.recut`, 202). 409 unless the ad is `READY`. Owners, admins and strategists. |
 | `DELETE /orgs/:id/ads/:adId` | Deletes the file and everything read from it. |
 
 ### 16.3 What the worker does
 
-Download → normalise → shots (saved) → three whole-ad passes on the **fast** model in parallel (context; on-screen text at high resolution; script, music and sounds) → one call per shot on the **smart** model, clipped with `videoMetadata`, at most 4 at once → elements saved → **placing**: a text-only fast-model call turns the shots into cues (lifestyles, hobbies, moods, everyday situations), Qloo places each cue and the ad's named references, the verdict is saved as an `ad_check`, and each shot gets a territory with its cues as evidence → `READY`. Each shot's description is saved as it arrives, so a retry only repeats the cheap whole-ad passes. One Redis lock per ad; a second delivery is skipped.
+Download → normalise → shots (saved) → three whole-ad passes on the **fast** model in parallel (context; on-screen text at high resolution; script, music and sounds) → one call per shot on the **smart** model, clipped with `videoMetadata`, at most 4 at once → elements saved → **placing**: a text-only fast-model call turns the shots into cues (lifestyles, hobbies, moods, everyday situations), Qloo places each cue and the ad's named references, the verdict is saved as an `ad_check`, and each shot gets a territory with its cues as evidence → **re-cuts** (stage "writing re-cuts"; non-fatal): one text-only smart-model call with every shot, its cues and where they lean, the words on screen, the script and the verdict returns Recommended, Shortest and Boldest as *changes* (drop, trim, move, caption, end card), each with what, why and evidence; code applies them into an edit list (clips, overlays, length) and reads the result from the kept shots' cues → `READY`. Each shot's description is saved as it arrives, so a retry only repeats the cheap whole-ad passes. One Redis lock per ad; a second delivery is skipped.
 
 | Failure | Result |
 |---|---|
@@ -498,6 +500,7 @@ Download → normalise → shots (saved) → three whole-ad passes on the **fast
 - **Placing a cue** (probe of 26 October, `plan-ad-check.md` Phase 2): `/v2/tags` with `feature.semantic_search` limited to lifestyle, hobby, media keyword, media genre, adjective and subgenre tags (the only types that carried brand signal), up to 4 tags; each scored with `/v2/insights` (`filter.type=urn:entity:brand`, `signal.interests.tags`, `filter.results.entities` = your side and the rivals, no location). Your side is the strongest of your brand and the brands your customers also buy. 0.764996 is Qloo's "no data". A gap under 0.03 is shared ground. The tag where one side is clearly ahead wins. Settings and visual style are never scored (no tag type for them carries brand signal), and the verdict says so.
 - **Named references** are searched by kind (brand, place, title, person; a bare search finds shops and albums first), preferring a result that is on the map.
 - **No ready map:** the check says to build one first.
+- **Re-cuts:** Gemini sees and returns shots numbered from 1, as the owner sees them (`fromShotNumbers` converts back); a change that wouldn't do anything (a trim with no times, a caption with no words, a move with nowhere to go) is dropped; only captions and end cards keep words; Shortest is trimmed evenly to 15 s, said as its own change. Nothing is rendered: the browser plays the original clip by clip with the captions drawn on top.
 - **Practice:** `GEMINI_PROVIDER=practice` returns scripted, schema-checked answers at no cost; the tests run the whole flow this way against real Blob storage.
 
 ## 17. Who can see a workspace (`workspaceAccess`, `src/modules/orgs/access.ts`)

@@ -34,7 +34,7 @@ export const QUEUES = {
   adCheck: {
     name: "xray.ad.check",
     exchange: EXCHANGES.jobs.name,
-    bindings: ["ad.check"],
+    bindings: ["ad.check", "ad.recut"],
     prefetch: 1,
     maxAttempts: 3,
     retryDelayMs: 60_000,

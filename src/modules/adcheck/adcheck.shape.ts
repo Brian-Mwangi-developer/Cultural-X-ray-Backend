@@ -233,7 +233,7 @@ export function elementsFrom(durationMs: number, context: AdContext, text: AdTex
 
 // ── Plain words for people ──────────────────────────────────────────────────────────────────────
 
-export const STAGES = ["uploading", "queued", "preparing", "finding shots", "watching", "reading text", "listening", "describing shots", "saving", "placing on your map", "ready"] as const;
+export const STAGES = ["uploading", "queued", "preparing", "finding shots", "watching", "reading text", "listening", "describing shots", "saving", "placing on your map", "writing re-cuts", "ready"] as const;
 export type Stage = (typeof STAGES)[number];
 
 export const FAILURE = {
