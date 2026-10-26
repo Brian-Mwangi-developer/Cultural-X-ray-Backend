@@ -241,5 +241,6 @@ export const FAILURE = {
   unreadable: "We couldn't open this video. Try exporting it again as MP4.",
   missing: "The upload didn't finish. Try again.",
   busy: "Reading took too long. Try again.",
+  failed: "Something went wrong while reading this ad. Try again; if it keeps happening, tell us with the feedback tab.",
   off: "Ad reading isn't set up yet.",
 } as const;

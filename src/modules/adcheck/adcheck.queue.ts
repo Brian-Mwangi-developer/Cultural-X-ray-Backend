@@ -12,7 +12,7 @@ import { comparisonFor, placeCues, placeReferences } from "@/modules/adcheck/adc
 import { cuesPrompt, cuesSchema, noMapVerdict, type PlacedCue, practiceCues, shotTerritory, uniqueCues, type Verdict, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
 import { prepare } from "@/modules/adcheck/adcheck.video";
 import { download } from "@/modules/adcheck/storage";
-import { GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
+import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
 import type { Attribution } from "@/modules/usage/ai-calls";
 
 /**
@@ -192,8 +192,13 @@ const checkAd: Handler<typeof jobSchema> = {
       } else if (error instanceof GeminiUnavailable) {
         logger.error({ adId, ...errorDetails(error) }, "ad check: Gemini is not available");
         await fail(adId, FAILURE.off);
+      } else if (error instanceof GeminiRequestError) {
+        // Our request was wrong, not the ad: people get a plain sentence, the logs get the detail.
+        logger.error({ adId, stage: error.stage, detail: error.detail }, "ad check: Gemini rejected a request");
+        await fail(adId, FAILURE.failed);
       } else if (error instanceof PermanentError) {
-        await fail(adId, error.message);
+        // Our own reasons (too long, unreadable, upload missing) are written for people.
+        await fail(adId, Object.values(FAILURE).includes(error.message as never) || error.message.startsWith("This ad is longer") ? error.message : FAILURE.failed);
       } else if (envelope.attempt >= QUEUES.adCheck.maxAttempts) {
         logger.warn({ adId, ...errorDetails(error) }, "ad check: out of attempts");
         await fail(adId, FAILURE.busy);

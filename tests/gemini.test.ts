@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { prisma } from "@/infra/database";
 import { audioSchema, contextSchema, practice, shotSchema, textSchema } from "@/modules/adcheck/adcheck.shape";
-import { classify, forGemini, GeminiUnavailable, generate, readAnswer } from "@/modules/gemini/gemini.client";
+import { clampLists, classify, forGemini, GeminiUnavailable, generate, readAnswer } from "@/modules/gemini/gemini.client";
 
 const adId = `test-${randomUUID().slice(0, 8)}`;
 
@@ -18,14 +18,21 @@ describe("gemini: the request", () => {
     const text = JSON.stringify(schema);
     expect(text).not.toContain("$schema");
     expect(text).not.toContain("9007199254740991");
+    // Vertex 400s on lists of ranged numbers (the audio script, 26 Oct): ranges are never sent.
+    expect(text).not.toMatch(/"(minimum|maximum)"/);
     expect(text).not.toContain('"const"');
-    expect(schema).toMatchObject({ type: "object", properties: { kind: { enum: ["one"] }, list: { maxItems: 40 } } });
+    // …and no list caps: nested capped lists were rejected too (the re-cuts, 26 Oct).
+    expect(text).not.toMatch(/"(minItems|maxItems)"/);
+    expect(schema).toMatchObject({ type: "object", properties: { kind: { enum: ["one"] }, list: { type: "array" } } });
   });
 
-  it("keeps every ad check list at 40 items or fewer (60 was rejected)", () => {
-    const maxItems = [contextSchema, textSchema, audioSchema, shotSchema].flatMap((s) => [...JSON.stringify(forGemini(s)).matchAll(/"maxItems":(\d+)/g)].map((m) => Number(m[1])));
-    expect(maxItems.length).toBeGreaterThan(5);
-    expect(Math.max(...maxItems)).toBeLessThanOrEqual(40);
+  it("still holds every list to its cap: long answers are trimmed, then checked", () => {
+    const schema = z.object({ list: z.array(z.object({ tags: z.array(z.string()).max(2) })).max(3) });
+    const answer = { list: Array.from({ length: 5 }, () => ({ tags: ["a", "b", "c", "d"] })) };
+    const clamped = schema.parse(clampLists(answer, schema));
+    expect(clamped.list).toHaveLength(3);
+    expect(clamped.list[0]!.tags).toEqual(["a", "b"]);
+    expect(() => audioSchema.parse(clampLists({ script: Array.from({ length: 60 }, (_, i) => ({ startS: i, endS: i + 1, speaker: "narrator", words: "hi" })), music: { present: false, genre: "", mood: "", tempo: "none", vocals: "none" }, sounds: [] }, audioSchema))).not.toThrow();
   });
 });
 

@@ -48,6 +48,14 @@ export class PolicyRefusal extends PermanentError {
   }
 }
 
+/** Vertex refused the request itself (a bad schema or input). Not retried; the details go to the logs, not to people. */
+export class GeminiRequestError extends PermanentError {
+  constructor(readonly stage: string, readonly detail: string) {
+    super(`Vertex AI rejected the ${stage} request`);
+    this.name = "GeminiRequestError";
+  }
+}
+
 /** Reading is switched off, or Vertex isn't set up (no project, no credentials). */
 export class GeminiUnavailable extends PermanentError {
   constructor(message: string) {
@@ -63,22 +71,43 @@ const REFUSED_FINISH = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SP
 export const modelFor = (tier: Tier) => config.gemini.models[tier];
 
 /**
- * zod's JSON schema, trimmed to what Vertex accepts: no `$schema`, and no ±2^53 bounds on integers
- * (zod adds them; they only add noise to the request).
+ * zod's JSON schema, trimmed to what Vertex accepts: no `$schema`, no number ranges and no list
+ * caps. Vertex rejects a schema it finds too complex with a bare 400 "invalid argument", and caps and
+ * ranges are what tip it over (26 Oct 2026: a capped list of ranged times in the audio pass; capped
+ * lists nested in a capped list for the re-cuts). The limits still hold: `clampLists` trims long
+ * lists to their cap, then the zod schema checks the answer.
  */
 export function forGemini(schema: z.ZodType): Record<string, unknown> {
+  const DROP = new Set(["$schema", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minItems", "maxItems"]);
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (!node || typeof node !== "object") return node;
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(node)) {
-      if (key === "$schema") continue;
-      if ((key === "minimum" || key === "maximum") && Math.abs(value as number) >= Number.MAX_SAFE_INTEGER) continue;
+      if (DROP.has(key)) continue;
       out[key] = strip(value);
     }
     return out;
   };
   return strip(z.toJSONSchema(schema)) as Record<string, unknown>;
+}
+
+type Json = { type?: string | string[]; properties?: Record<string, Json>; items?: Json; maxItems?: number; anyOf?: Json[] };
+
+/** Trim every list in an answer to the cap its schema sets (the first items are kept). */
+export function clampLists(value: unknown, schema: z.ZodType): unknown {
+  const walk = (v: unknown, s: Json | undefined): unknown => {
+    if (!s) return v;
+    if (Array.isArray(v)) {
+      const kept = s.maxItems !== undefined ? v.slice(0, s.maxItems) : v;
+      return kept.map((x) => walk(x, s.items));
+    }
+    if (v && typeof v === "object" && s.properties) {
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, s.properties![k])]));
+    }
+    return v;
+  };
+  return walk(value, z.toJSONSchema(schema) as Json);
 }
 
 /** What an HTTP failure means: try again, a policy refusal, or a mistake retrying won't fix. */
@@ -185,7 +214,10 @@ async function viaVertex<S extends z.ZodType>(req: GenerateRequest<S>): Promise<
       await record(kind === "refused" ? "refused" : "error", started);
       if (kind === "refused") throw new PolicyRefusal(req.stage, `HTTP ${res.status}`);
       lastError = new Error(`Vertex AI ${res.status} on ${req.stage}: ${text.slice(0, 300)}`);
-      if (kind === "fail") throw res.status === 401 || res.status === 403 ? new GeminiUnavailable(String((lastError as Error).message)) : new PermanentError((lastError as Error).message);
+      if (kind === "fail") {
+        logger.error({ stage: req.stage, model, status: res.status, detail: text.slice(0, 1000) }, "gemini: request rejected");
+        throw res.status === 401 || res.status === 403 ? new GeminiUnavailable(String((lastError as Error).message)) : new GeminiRequestError(req.stage, text.slice(0, 1000));
+      }
       if (attempt < TRIES) await wait(backoff(attempt, res.headers.get("retry-after")));
       continue;
     }
@@ -198,7 +230,7 @@ async function viaVertex<S extends z.ZodType>(req: GenerateRequest<S>): Promise<
     // A malformed answer is paid for like any other, so it is recorded before being checked.
     await record("ok", started, answer.usage);
     try {
-      return { json: req.schema.parse(JSON.parse(answer.text)), usage: answer.usage, model, provider: "vertex" };
+      return { json: req.schema.parse(clampLists(JSON.parse(answer.text), req.schema)), usage: answer.usage, model, provider: "vertex" };
     } catch (error) {
       lastError = error;
       logger.warn({ stage: req.stage, model, attempt, ...errorDetails(error) }, "gemini: answer did not match the schema");
