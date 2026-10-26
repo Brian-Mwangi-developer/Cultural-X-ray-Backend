@@ -9,6 +9,7 @@ import { emailHandlers } from "@/modules/email/email.queue";
 import { diagnosticHandlers } from "@/modules/ops/diagnostics.queue";
 import { siteHandlers } from "@/modules/lookup/site";
 import { mapHandlers } from "@/modules/maps/map.build";
+import { playHandlers } from "@/modules/plays/plays.queue";
 import { adCheckHandlers } from "@/modules/adcheck/adcheck.queue";
 import { startVideoSweep, stopVideoSweep } from "@/modules/adcheck/adcheck.service";
 
@@ -20,7 +21,7 @@ const CONSUMERS: Array<[QueueSpec, HandlerMap]> = [
   [QUEUES.email, emailHandlers],
   [QUEUES.diagnostics, diagnosticHandlers],
   [QUEUES.siteRead, siteHandlers],
-  [QUEUES.mapBuild, mapHandlers],
+  [QUEUES.mapBuild, { ...mapHandlers, ...playHandlers }],
   [QUEUES.adCheck, adCheckHandlers],
 ];
 

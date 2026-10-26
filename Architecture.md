@@ -515,3 +515,43 @@ Every workspace data route (maps and audience, ad checks, Ask X-Ray) resolves th
 
 The brand's decisions apply on the agency's next request: lowering access to VIEW removes uploading at once (the web hides it; the API answers 403), ending the connection returns 404. Tests: `tests/access.test.ts`. The web mirrors the role rule only to shape the UI (`clientRole` in `web/src/lib/roles.ts`).
 
+
+## 18. Plays and creators (`src/modules/plays`, `src/modules/creators`)
+
+Plays are moves a brand can make this month, written from its latest ready Culture Map. Creators are the people on that map with their real public channels. Plan: `../plan-plays-creators.md`; boards: Figma page 12.
+
+### 18.1 How plays are written
+
+When a map finishes (`finish()` in `map.build.ts`), or on **Refresh plays**, the `plays.write` job (on the map-build queue) runs:
+1. It builds the context from the map: per category, up to 8 items on your side in Qloo's order, plus 3 of each rival's for contrast, with each category's reading.
+2. It asks the **smart** model, text only (about 1¢), for up to 6 plays. Each play names its items by ref and gives a title, body, why and brief.
+3. `keepBacked` keeps only plays whose items are on the map and on your side, all from one category. It takes the kind from the map (`PLAY_OF`), allows no two plays on one item, at most two per kind and six in all.
+4. Each item gets its tooltip words from `proofOf`: where it ranks among your customers' list and whether rivals' customers rank it. No scores.
+
+The prompt tells Gemini to claim only what the map shows (a first run claimed "untouched by competitor ad spend"). While the job runs, Redis holds `plays:writing:<mapId>` and the page shows it.
+
+### 18.2 How creators are found (no keys, no sign-in)
+
+After writing plays, the job checks up to 16 people on the map (yours and shared) with `enrichPeople`:
+- **Qloo** `/entities` gives each person's handles (`properties.external.instagram|twitter|facebook`) and a short description.
+- **YouTube:** the public `@handle` page (canonical channel id, title, the page's own "30.6k subscribers") for each listed handle, then the person's name run together. Latest uploads come from the channel's public feed (`/feeds/videos.xml`), cached six hours in Redis.
+- **TikTok:** the official oEmbed (`tiktok.com/oembed?url=…/@handle`), which returns the account's display name.
+
+A channel only counts when it is confirmed. Strangers with the same handle are common (the probe found `@themontydon` was someone else, and `@sjdooley` was a fan video).
+- **YouTube:** the channel's name must be the person's, or its description or its own recent video titles must name them ("GiuseppeCooks" passes because its videos point to giuseppedellanno.com).
+- **TikTok:** an account written as one word after its own handle counts as a handle match only. The page labels it "check it's them".
+
+Profiles live in `creator_profile` and are rechecked after 30 days. Content is shown through each platform's own embed in the viewer's browser (YouTube via `youtube-nocookie.com`, loaded on click; TikTok's creator embed). Nothing is downloaded or stored. TikTok's embed can answer "overload-protect triggered" when a machine has made many requests; the profile link still works.
+
+### 18.3 Endpoints (all under `/api/v1`, `workspaceAccess`, so agencies read their clients' plays)
+
+| Endpoint | Does |
+|---|---|
+| `GET /orgs/:id/plays` | Plays from the latest ready map, `writing`, `writtenAt`, `mapReady`. |
+| `POST /orgs/:id/plays/refresh` | Rewrite them (202). Writers only; 409 without a ready map. |
+| `GET /orgs/:id/plays/:playId` | One play, only if it belongs to this workspace. |
+| `GET /orgs/:id/creators?play=` | Creator cards: the play's own people first, then everyone else who's yours or shared. Profiles, latest three videos. |
+| `GET /orgs/:id/creators/:entityId` | One creator. 404 unless they are on this workspace's map, so no arbitrary lookups. |
+| `POST /orgs/:id/creators/:entityId/outreach` `{ playId? }` | A first message (fast model, about 0.1¢) to copy and send yourself. Writers only. It names one of their videos, never other creators, never anyone's looks. |
+
+Costs are attributed to the person and workspace as `PLAYS` in `ai_call`.

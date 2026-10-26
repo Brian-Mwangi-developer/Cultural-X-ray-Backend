@@ -65,6 +65,7 @@ enum SubscriptionStatus {
 enum UsageKind {
   MAP_BUILD
   AD_CHECK
+  PLAYS
   BRIEF
   LOCALIZE
   OTHER
@@ -538,6 +539,7 @@ model QlooEntity {
   territoryItems TerritoryItem[]
   geoSignals     GeoSignal[]
   plays          Play[]
+  creator        CreatorProfile?
   adElements     AdElement[]
   competitorAds  Ad[]
 
@@ -736,6 +738,12 @@ model Play {
   kind       PlayKind
   title      String
   rationale  String
+  /// One line: why the map backs it. Shown on the list.
+  why        String?
+  /// What to brief a partner, a few short lines.
+  brief      Json?
+  /// The map items it rests on, with the words for their tooltips.
+  items      Json?
   rank       Int
   entityId   String?
   entity     QlooEntity? @relation(fields: [entityId], references: [id], onDelete: SetNull)
@@ -1005,4 +1013,28 @@ model AuditEvent {
 
   @@index([organizationId, createdAt])
   @@map("audit_event")
+}
+
+/// A person's channels, found from the handles Qloo lists for them and confirmed by name (no keys,
+/// nothing scraped beyond the channel's public page). Shown on Plays as their real content.
+model CreatorProfile {
+  entityId        String     @id
+  entity          QlooEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  description     String?
+  instagram       String?
+  twitter         String?
+  facebook        String?
+  youtubeChannel  String?
+  youtubeHandle   String?
+  youtubeTitle    String?
+  /// As the channel page says it, e.g. "30.6k".
+  subscribers     String?
+  /// "name" (the account's name is the person's) or "handle" (it uses the handle Qloo lists).
+  youtubeMatch    String?
+  tiktokHandle    String?
+  tiktokName      String?
+  tiktokMatch     String?
+  checkedAt       DateTime   @updatedAt
+
+  @@map("creator_profile")
 }

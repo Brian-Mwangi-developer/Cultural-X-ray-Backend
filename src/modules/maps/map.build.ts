@@ -11,6 +11,7 @@ import { enqueueEmail, isUndeliverable } from "@/modules/email/email.queue";
 import { cacheKey, TTL } from "@/modules/lookup/cache";
 import { qloo } from "@/modules/lookup/qloo.client";
 import { audienceParams, type Category, CATEGORIES, type Entity, entitiesOf, insightsParams, type Market, readingFor, scoresIn, SEGMENTS, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
+import { enqueuePlays } from "@/modules/plays/plays.queue";
 
 /**
  * Building a Culture Map in the worker. The web only reads progress, so leaving the page,
@@ -229,7 +230,10 @@ async function planFor(mapId: string) {
 async function finish(mapId: string, workspaceId: string, workspace: { name: string; slug: string }, createdById: string | null) {
   const mine = await prisma.territoryItem.count({ where: { mapId, label: { in: ["YOURS", "CONTESTED"] } } });
   const flipped = await prisma.cultureMap.updateMany({ where: { id: mapId, status: { not: "READY" } }, data: { status: "READY", builtAt: new Date(), thinData: mine < 20 } });
-  if (!flipped.count || !createdById) return;
+  if (!flipped.count) return;
+  // Plays are written from the finished map; a failure to queue them never fails the build.
+  await enqueuePlays(mapId, workspaceId, createdById).catch((error) => logger.warn({ mapId, ...errorDetails(error) }, "map: plays not queued"));
+  if (!createdById) return;
   const user = await prisma.user.findUnique({ where: { id: createdById }, select: { email: true, name: true } });
   const podcast = await prisma.mapReading.findFirst({ where: { mapId, category: "PODCAST" }, select: { text: true } });
   const url = `${config.http.publicWebUrl}/${workspace.slug}`;
