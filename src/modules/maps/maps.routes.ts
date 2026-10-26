@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
-import { membershipOf, requireRole } from "@/modules/orgs/access";
+import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
 import { audienceOf, latestMap, startBuild } from "@/modules/maps/map.service";
 
@@ -13,7 +13,7 @@ const buildSchema = z.object({ rebuild: z.boolean().default(false) }).default({ 
 mapsRouter.post("/orgs/:id/maps", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization, member } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization, member } = await workspaceAccess(user.id, { id: String(req.params.id) });
     requireRole(member.role, ["owner", "admin", "strategist"], "build maps");
     const { rebuild } = buildSchema.parse(req.body ?? {});
     const map = await startBuild(organization.id, user.id, { rebuild });
@@ -28,7 +28,7 @@ mapsRouter.post("/orgs/:id/maps", requireAuth, async (req, res, next) => {
 mapsRouter.get("/orgs/:id/maps/latest", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     res.set("Cache-Control", "no-store").json({ map: await latestMap(organization.id) });
   } catch (error) {
     next(error);
@@ -39,7 +39,7 @@ mapsRouter.get("/orgs/:id/maps/latest", requireAuth, async (req, res, next) => {
 mapsRouter.get("/orgs/:id/maps/latest/audience", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     res.set("Cache-Control", "no-store").json({ audience: await audienceOf(organization.id) });
   } catch (error) {
     next(error);

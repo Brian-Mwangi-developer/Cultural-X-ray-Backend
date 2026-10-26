@@ -9,7 +9,7 @@ import { prisma } from "@/infra/database";
 import { redis } from "@/infra/redis";
 import { errorDetails, logger } from "@/observability/logger";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
-import { membershipOf } from "@/modules/orgs/access";
+import { workspaceAccess } from "@/modules/orgs/access";
 import { practiceModel } from "@/modules/ask/ask.practice";
 import { instructionsFor } from "@/modules/ask/ask.prompt";
 import { type AskMessage, deleteThread, messagesOf, saveMessage, threadFor, threadsOf, threadWithMessages } from "@/modules/ask/ask.service";
@@ -59,7 +59,7 @@ function modelFor() {
 askRouter.post("/orgs/:id/ask", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     const input = sendSchema.parse(req.body);
     const chosen = modelFor();
     if (!chosen) throw new HttpError(503, "Ask X-Ray isn't connected to a model yet.", { code: "ASK_NOT_CONNECTED" });
@@ -137,7 +137,7 @@ askRouter.get("/ask/status", requireAuth, (_req, res) => {
 askRouter.get("/orgs/:id/ask/threads", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     res.json({ threads: await threadsOf(organization.id, user.id) });
   } catch (error) {
     next(error);
@@ -147,7 +147,7 @@ askRouter.get("/orgs/:id/ask/threads", requireAuth, async (req, res, next) => {
 askRouter.get("/orgs/:id/ask/threads/:threadId", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     res.json(await threadWithMessages(organization.id, user.id, String(req.params.threadId)));
   } catch (error) {
     next(error);
@@ -157,7 +157,7 @@ askRouter.get("/orgs/:id/ask/threads/:threadId", requireAuth, async (req, res, n
 askRouter.delete("/orgs/:id/ask/threads/:threadId", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
-    const { organization } = await membershipOf(user.id, { id: String(req.params.id) });
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     await deleteThread(organization.id, user.id, String(req.params.threadId));
     res.status(204).end();
   } catch (error) {

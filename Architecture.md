@@ -300,8 +300,7 @@ Done:
 Open:
 - This app's own sending domain (today it sends as `platform.learnitpal.com`), and hosting email images on it instead of Unsplash.
 - Per-client access for agency members (`member_client_access`): the tables exist and the clients list honours them, but there's no UI to narrow a member to some clients yet.
-- Billing, Qloo usage metering (the sidebar meter), briefs, plays beyond the overview's three, the Culture Map page and ad checks: the web shows sample data for these. The overview and the build screen are live.
-- Agencies can't read or build a client's map yet: map routes check direct membership only. Reuse the connection access rules when the agency client views go live.
+- Billing, Qloo usage metering (the sidebar meter), briefs, plays beyond the overview's three and the Culture Map page: the web shows sample data for these. The overview, the build screen, Audience & places, ad checks and Ask X-Ray are live, for the brand's team and for connected agencies alike.
 - Deleting a user straight from the database leaves their sessions alive in Redis (Better Auth's secondary storage) until they expire. Delete users through Better Auth, or revoke their sessions first.
 - Connection writes make several sequential round trips to Neon (about 7 s from Nairobi). Batch them or move the database closer before launch.
 - Alert delivery (Alertmanager, Slack or email) and production deployment target.
@@ -500,4 +499,16 @@ Download → normalise → shots (saved) → three whole-ad passes on the **fast
 - **Named references** are searched by kind (brand, place, title, person; a bare search finds shops and albums first), preferring a result that is on the map.
 - **No ready map:** the check says to build one first.
 - **Practice:** `GEMINI_PROVIDER=practice` returns scripted, schema-checked answers at no cost; the tests run the whole flow this way against real Blob storage.
+
+## 17. Who can see a workspace (`workspaceAccess`, `src/modules/orgs/access.ts`)
+
+Every workspace data route (maps and audience, ad checks, Ask X-Ray) resolves the caller with `workspaceAccess`, so a brand's own team and a connected agency see the same data through the same endpoints. Settings, members, onboarding setup and connections keep `membershipOf`: agencies never manage a brand's account.
+
+| Caller | Gets in | Role |
+|---|---|---|
+| A member of the organisation | Always | Their own |
+| Someone at an agency | Only through an **ACTIVE** connection to the workspace, and only if they may see that client (`allClients`, or a `member_client_access` row) | The lower of their agency role and the grant: VIEW → viewer, EDIT → strategist, MANAGE → admin. Never owner |
+| Anyone else, or a requested / declined / ended connection | No: the same 404 as a workspace that doesn't exist | — |
+
+The brand's decisions apply on the agency's next request: lowering access to VIEW removes uploading at once (the web hides it; the API answers 403), ending the connection returns 404. Tests: `tests/access.test.ts`. The web mirrors the role rule only to shape the UI (`clientRole` in `web/src/lib/roles.ts`).
 
