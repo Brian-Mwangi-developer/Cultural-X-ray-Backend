@@ -47,6 +47,16 @@ async function probe(file: string): Promise<Probe | null> {
   return { durationMs, width: video.width ?? 0, height: video.height ?? 0, hasAudio: Boolean(info.streams?.some((s) => s.codec_type === "audio")) };
 }
 
+/** Below this peak loudness the sound track is silence: the audio pass is skipped, not guessed at. */
+const SILENT_DB = -50;
+
+/** Peak loudness of a file's sound in dB (≈ -91 for digital silence), or null when it can't be measured. */
+async function peakDb(file: string): Promise<number | null> {
+  const { code, stderr } = await run("ffmpeg", ["-hide_banner", "-i", file, "-vn", "-af", "volumedetect", "-f", "null", "-"], 60_000);
+  const m = stderr.match(/max_volume:\s*(-?[\d.]+) dB/);
+  return code === 0 && m ? Number(m[1]) : null;
+}
+
 export type Prepared = Probe & { video: Buffer; cutsMs: number[] };
 
 /**
@@ -74,6 +84,12 @@ export async function prepare(upload: Buffer, maxMs: number): Promise<Prepared |
     if (encode.code !== 0) return null;
     const normalised = await probe(output);
     if (!normalised) return null;
+    // A track of silence still counts as "audio" to ffprobe; Gemini then invents a voice-over and
+    // music (seen 26 Oct on a silent draft). Only audible sound is sent to the audio pass.
+    if (normalised.hasAudio) {
+      const peak = await peakDb(output);
+      if (peak !== null && peak < SILENT_DB) normalised.hasAudio = false;
+    }
 
     const scenes = await run("ffmpeg", ["-v", "info", "-i", output, "-an", "-vf", `select='gt(scene,${SCENE})',showinfo`, "-f", "null", "-"]);
     return { ...normalised, video: await readFile(output), cutsMs: scenes.code === 0 ? cutsFromShowinfo(scenes.stderr) : [] };

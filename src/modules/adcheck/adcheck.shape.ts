@@ -98,6 +98,7 @@ export const prompts = {
       "- script: every line spoken or sung, with start and end in seconds, and the speaker by role (narrator, customer, singer…).",
       "- music: whether there is music, its genre, its mood in a few words, its tempo, and whether it has vocals.",
       "- sounds: other sounds that matter (a door, a crowd, a notification), with when they happen.",
+      "Only report what you actually hear. If nobody speaks, script is empty; if there is no music, set present to false. Never infer speech or music from what the pictures or on-screen text suggest.",
       PEOPLE_RULE,
       JSON_ONLY,
     ].join("\n"),
