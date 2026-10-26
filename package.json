@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "bash scripts/dev.sh",
+    "dev:lite": "NO_MONITORING=1 bash scripts/dev.sh",
     "dev:api": "tsx watch --clear-screen=false src/server.ts",
     "dev:worker": "tsx watch --clear-screen=false src/worker.ts",
     "build": "prisma generate && tsup",

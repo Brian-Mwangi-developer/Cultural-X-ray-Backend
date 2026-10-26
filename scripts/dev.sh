@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Brings up Redis, RabbitMQ and monitoring, waits until healthy, then runs the API and worker
 # on the host with live reload. Ctrl-C stops the Node processes; containers keep running.
+# NO_MONITORING=1 (pnpm dev:lite) skips Prometheus and Grafana: lighter on a laptop.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 [[ -f .env ]] || bash scripts/init-env.sh
-bash scripts/stack.sh up monitoring
+bash scripts/stack.sh up "$([[ -n "${NO_MONITORING:-}" ]] && echo infra || echo monitoring)"
 pnpm exec prisma generate >/dev/null
 
 prefix() { sed -u "s/^/[$1] /"; }
