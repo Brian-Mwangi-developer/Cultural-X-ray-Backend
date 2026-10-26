@@ -7,7 +7,9 @@ import { publish } from "@/messaging/publisher";
 import { EXCHANGES, QUEUES } from "@/messaging/topology";
 import { type Handler, type HandlerMap, Outcome, PermanentError } from "@/messaging/types";
 import { errorDetails, logger } from "@/observability/logger";
-import { audioSchema, contextSchema, elementsFrom, FAILURE, practice, prompts, type Shot, type ShotDescription, shotSchema, shotsFrom, type Stage, textSchema } from "@/modules/adcheck/adcheck.shape";
+import { type AdAudio, type AdContext, audioSchema, contextSchema, elementsFrom, FAILURE, practice, prompts, type Shot, type ShotDescription, shotSchema, shotsFrom, type Stage, textSchema } from "@/modules/adcheck/adcheck.shape";
+import { comparisonFor, placeCues, placeReferences } from "@/modules/adcheck/adcheck.place";
+import { cuesPrompt, cuesSchema, noMapVerdict, type PlacedCue, practiceCues, shotTerritory, uniqueCues, type Verdict, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
 import { prepare } from "@/modules/adcheck/adcheck.video";
 import { download } from "@/modules/adcheck/storage";
 import { GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
@@ -60,7 +62,7 @@ async function eachLimited<T>(items: T[], limit: number, work: (item: T) => Prom
 async function read(adId: string, attempt: number) {
   const ad = await prisma.ad.findUnique({
     where: { id: adId },
-    select: { id: true, status: true, storageKey: true, workspaceId: true, uploadedById: true, videoDeletedAt: true, shots: { select: { index: true, startMs: true, endMs: true, description: true }, orderBy: { index: "asc" } } },
+    select: { id: true, status: true, storageKey: true, workspaceId: true, uploadedById: true, videoDeletedAt: true, rivals: true, shots: { select: { index: true, startMs: true, endMs: true, description: true }, orderBy: { index: "asc" } } },
   });
   if (!ad || ad.status === "READY") return Outcome.Skipped;
   if (ad.videoDeletedAt) {
@@ -116,10 +118,60 @@ async function read(adId: string, attempt: number) {
   await prisma.$transaction([
     prisma.adElement.deleteMany({ where: { adId } }),
     prisma.adElement.createMany({ data: rows.map((r) => ({ adId, kind: r.kind, raw: r.raw, detail: r.detail as Prisma.InputJsonObject | undefined, startMs: r.startMs, endMs: r.endMs })) }),
-    prisma.ad.update({ where: { id: adId }, data: { status: "READY", stage: "ready", readAt: new Date(), failureReason: null } }),
   ]);
-  logger.info({ adId, shots: shots.length, described: described.size, elements: rows.length, attempt }, "ad read");
+
+  await setStage(adId, "placing on your map");
+  const verdict = await placeOnMap(adId, ad.workspaceId, ad.rivals, context.json, audio.json, shots, described, who);
+  await prisma.ad.update({ where: { id: adId }, data: { status: "READY", stage: "ready", readAt: new Date(), failureReason: null } });
+  logger.info({ adId, shots: shots.length, described: described.size, elements: rows.length, lean: verdict.lean, attempt }, "ad read");
   return Outcome.Processed;
+}
+
+/**
+ * Gemini turns the shots into cues (fast model, text only), Qloo places them and the ad's named
+ * references, and the verdict is saved as a new check. Without a ready map the check says to build one.
+ */
+async function placeOnMap(adId: string, workspaceId: string, rivals: unknown, context: AdContext, audio: AdAudio, shots: Shot[], described: Map<number, ShotDescription>, who: Attribution) {
+  const extra = (rivals as { entityIds?: string[] } | null)?.entityIds ?? [];
+  const comparison = await comparisonFor(workspaceId, extra);
+  if (!comparison) {
+    const map = await prisma.cultureMap.findFirst({ where: { workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true } });
+    const verdict = noMapVerdict();
+    if (map) await saveCheck(adId, map.id, verdict);
+    return verdict;
+  }
+
+  const seen = shots.flatMap((s) => (described.has(s.index) ? [{ index: s.index, description: described.get(s.index)! }] : []));
+  const music = audio.music.present ? [audio.music.genre, audio.music.mood].filter(Boolean).join(", ") : "";
+  const { json: cues } = await generate({
+    stage: "cues",
+    tier: "fast",
+    parts: [cuesPrompt(context, seen, music)],
+    schema: cuesSchema,
+    practice: practiceCues(seen.map((s) => s.index)),
+    attribution: who,
+  });
+  const shotCues = cues.shots.filter((s) => described.has(s.index));
+  const placed = await placeCues(uniqueCues(cues), comparison.side, who);
+  const references = await placeReferences([...context.references, ...context.brands.map((b) => ({ name: b.name, kind: "brand" }))], comparison);
+  const verdict = verdictFrom(placed, shotCues, references);
+
+  await prisma.$transaction([
+    ...shots.map((shot) => {
+      const mine = (shotCues.find((s) => s.index === shot.index)?.cues ?? []).map((c) => placed.get(c.toLowerCase().replace(/\s+/g, " ").trim())).filter((p): p is PlacedCue => Boolean(p));
+      return prisma.adShot.update({
+        where: { adId_index: { adId, index: shot.index } },
+        data: { territory: shotTerritory(mine), evidence: { cues: mine.map((p) => ({ cue: p.cue, tag: p.tag, territory: p.judged?.territory ?? null, rival: p.judged?.rival ?? null })) } },
+      });
+    }),
+  ]);
+  await saveCheck(adId, comparison.mapId, verdict);
+  return verdict;
+}
+
+/** One check per reading: a retry replaces it. */
+async function saveCheck(adId: string, mapId: string, verdict: Verdict) {
+  await prisma.$transaction([prisma.adCheck.deleteMany({ where: { adId } }), prisma.adCheck.create({ data: { adId, mapId, verdict: verdict as unknown as Prisma.InputJsonObject } })]);
 }
 
 const jobSchema = z.object({ adId: z.string().min(1) });

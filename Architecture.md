@@ -450,7 +450,7 @@ Open: agencies' Ask X-Ray (needs client map access); feedback sending (the web's
 
 ## 16. Ad check (`src/modules/adcheck`, `src/modules/gemini`, `src/modules/usage`)
 
-Someone uploads a draft ad; the worker reads what's seen and heard in it with Gemini on Vertex AI. Spec: `../spec-ad-check-recut.md`; plan and progress: `../plan-ad-check.md`. Placing it on the map, the verdict and the re-cuts come next (plan phases 2–4).
+Someone uploads a draft ad; the worker reads what's seen and heard in it with Gemini on Vertex AI. Spec: `../spec-ad-check-recut.md`; plan and progress: `../plan-ad-check.md`. It is then placed on the workspace's Culture Map and given a verdict in words. Re-cuts come next (plan phase 4).
 
 ### 16.1 Files
 
@@ -461,6 +461,8 @@ Someone uploads a draft ad; the worker reads what's seen and heard in it with Ge
 | `storage.ts` | Vercel Blob: one-path client upload tokens, `head`, download, ranged streaming, delete. |
 | `adcheck.video.ts` | ffmpeg: probe, normalise (H.264 + AAC, ≤720p, ~2 Mbps, ≤30 fps), scene cuts (`scene > 0.3`). |
 | `adcheck.shape.ts` | Pure: zod schemas per Gemini pass, prompts, the people rule, practice answers, shot cleaning, answers → `ad_element` rows. |
+| `adcheck.verdict.ts` | Pure: cue schema and prompt, judging a tag from brand scores, picking the clearest tag, the verdict in words. |
+| `adcheck.place.ts` | Qloo: the map to compare with, cue → tags → brand scores, named references searched by kind and looked up on the map. |
 | `adcheck.queue.ts` | The `ad.check` handler. |
 | `gemini/gemini.client.ts` | Vertex `generateContent` with structured output; retries; refusals; practice and off. |
 | `usage/pricing.ts`, `usage/ai-calls.ts` | Dated price table and `costMicros`; `recordCall` writes `ai_call`. |
@@ -478,7 +480,7 @@ Someone uploads a draft ad; the worker reads what's seen and heard in it with Ge
 
 ### 16.3 What the worker does
 
-Download → normalise → shots (saved) → three whole-ad passes on the **fast** model in parallel (context; on-screen text at high resolution; script, music and sounds) → one call per shot on the **smart** model, clipped with `videoMetadata`, at most 4 at once → elements saved → `READY`. Each shot's description is saved as it arrives, so a retry only repeats the cheap whole-ad passes. One Redis lock per ad; a second delivery is skipped.
+Download → normalise → shots (saved) → three whole-ad passes on the **fast** model in parallel (context; on-screen text at high resolution; script, music and sounds) → one call per shot on the **smart** model, clipped with `videoMetadata`, at most 4 at once → elements saved → **placing**: a text-only fast-model call turns the shots into cues (lifestyles, hobbies, moods, everyday situations), Qloo places each cue and the ad's named references, the verdict is saved as an `ad_check`, and each shot gets a territory with its cues as evidence → `READY`. Each shot's description is saved as it arrives, so a retry only repeats the cheap whole-ad passes. One Redis lock per ad; a second delivery is skipped.
 
 | Failure | Result |
 |---|---|
@@ -494,5 +496,8 @@ Download → normalise → shots (saved) → three whole-ad passes on the **fast
 - **Models per stage:** `GEMINI_MODEL_FAST` (Gemini 3.5 Flash-Lite) for the whole-ad passes, `GEMINI_MODEL_SMART` (Gemini 3.8 Flash) for shots. Flash-Lite hasn't been scored on the golden set yet (plan phase 2).
 - **Every call is costed:** `ai_call` holds provider, model, stage, feature, person, workspace, ad, tokens in/out/thinking, cost in micro-dollars (from `pricing.ts`, dated rows, global region, thinking billed as output), duration and outcome. Refusals and errors are recorded too. Practice calls are recorded at cost 0. A failed write is logged and never fails the job.
 - **Storage:** with `BLOB_ACCESS=private` (needs a private Blob store) only the backend can read files. On a public store, set `BLOB_ACCESS=public`: uploads get a random suffix so URLs can't be guessed, and playback still goes through the backend. Videos are deleted `ADCHECK_KEEP_DAYS` (14) after upload by the worker's hourly sweep; uploads never started are removed after a day.
+- **Placing a cue** (probe of 26 October, `plan-ad-check.md` Phase 2): `/v2/tags` with `feature.semantic_search` limited to lifestyle, hobby, media keyword, media genre, adjective and subgenre tags (the only types that carried brand signal), up to 4 tags; each scored with `/v2/insights` (`filter.type=urn:entity:brand`, `signal.interests.tags`, `filter.results.entities` = your side and the rivals, no location). Your side is the strongest of your brand and the brands your customers also buy. 0.764996 is Qloo's "no data". A gap under 0.03 is shared ground. The tag where one side is clearly ahead wins. Settings and visual style are never scored (no tag type for them carries brand signal), and the verdict says so.
+- **Named references** are searched by kind (brand, place, title, person; a bare search finds shops and albums first), preferring a result that is on the map.
+- **No ready map:** the check says to build one first.
 - **Practice:** `GEMINI_PROVIDER=practice` returns scripted, schema-checked answers at no cost; the tests run the whole flow this way against real Blob storage.
 
