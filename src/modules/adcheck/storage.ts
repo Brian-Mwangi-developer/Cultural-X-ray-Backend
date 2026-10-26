@@ -1,4 +1,4 @@
-import { BlobNotFoundError, del, get, head } from "@vercel/blob";
+import { BlobNotFoundError, del, get, head, list } from "@vercel/blob";
 import { generateClientTokenFromReadWriteToken } from "@vercel/blob/client";
 import { config } from "@/config/env";
 
@@ -81,7 +81,18 @@ export async function stream(pathname: string, range?: string) {
   };
 }
 
-/** Delete the video. Deleting what is already gone is fine. */
+/**
+ * Delete an ad's video: everything in its folder (`ads/<workspace>/<ad>/`). By folder, not by exact
+ * path, because on a public store the uploaded file has a random suffix the database may not know yet
+ * (an upload cancelled before "Check this ad"). Deleting what is already gone is fine.
+ */
 export async function remove(pathname: string) {
-  await del(pathname, { token: token() });
+  const folder = pathname.slice(0, pathname.lastIndexOf("/") + 1);
+  if (!/^ads\/[^/]+\/[^/]+\/$/.test(folder)) throw new Error(`refusing to delete outside an ad folder: ${pathname}`);
+  let cursor: string | undefined;
+  do {
+    const page = await list({ prefix: folder, cursor, limit: 100, token: token() });
+    if (page.blobs.length) await del(page.blobs.map((b) => b.url), { token: token() });
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
 }

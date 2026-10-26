@@ -14,7 +14,9 @@ import { assertTopology } from "@/messaging/topology";
 import { Outcome } from "@/messaging/types";
 import { cutsFromShowinfo, elementsFrom, PEOPLE_RULE, practice, prompts, shotsFrom, MAX_SHOTS } from "@/modules/adcheck/adcheck.shape";
 import { AD_CHECK, adCheckHandlers } from "@/modules/adcheck/adcheck.queue";
-import { uploadedPath, videoPath } from "@/modules/adcheck/storage";
+import { placeCues, qlooEnabled } from "@/modules/adcheck/adcheck.place";
+import { clearest, cuesPrompt, judge, uniqueCues, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
+import { describe as describeBlob, uploadedPath, videoPath } from "@/modules/adcheck/storage";
 import { startTestServer, waitFor } from "./helpers";
 
 describe("ad check: shots", () => {
@@ -45,10 +47,11 @@ describe("ad check: shots", () => {
 });
 
 describe("ad check: the people rule", () => {
-  const all = [prompts.context(), prompts.text(), prompts.audio(), prompts.shot(0, 3, 0, 2, practice.context)];
+  const cues = cuesPrompt(practice.context, [{ index: 0, description: practice.shot(0) }], "acoustic folk");
+  const all = [prompts.context(), prompts.text(), prompts.audio(), prompts.shot(0, 3, 0, 2, practice.context), cues];
 
   it("is in every prompt that can see or hear people", () => {
-    for (const p of [all[0], all[2], all[3]]) expect(p).toContain(PEOPLE_RULE);
+    for (const p of [all[0], all[2], all[3], all[4]]) expect(p).toContain(PEOPLE_RULE);
   });
 
   it("no prompt asks about age, body, face or looks outside the rule itself", () => {
@@ -71,6 +74,87 @@ describe("ad check: answers to elements", () => {
     expect(rows.find((r) => r.raw === "Late")).toMatchObject({ startMs: 3500, endMs: 4000 });
     expect(rows.every((r) => r.startMs >= 0 && r.endMs <= 4000 && r.endMs >= r.startMs)).toBe(true);
   });
+});
+
+describe("ad check: placing cues", () => {
+  const FILLER = 0.7649962877984056;
+  const side = { you: ["judes", "tonys"], rivals: [{ id: "bj", name: "Ben & Jerry's" }, { id: "hd", name: "Häagen-Dazs" }] };
+  const scores = (o: Record<string, number>) => new Map(Object.entries(o));
+
+  it("ignores Qloo's filler and says nothing when no brand has a real score", () => {
+    expect(judge(scores({ judes: FILLER, bj: FILLER, hd: FILLER }), side)).toBeNull();
+    expect(judge(scores({ judes: FILLER, bj: 0.95 }), side)).toMatchObject({ territory: "THEIRS", rival: "Ben & Jerry's" });
+  });
+
+  it("counts the brands your customers also buy as your side, and calls close gaps shared", () => {
+    expect(judge(scores({ judes: 0.8, tonys: 0.95, bj: 0.88 }), side)).toMatchObject({ territory: "YOURS" });
+    expect(judge(scores({ judes: 0.9, bj: 0.91, hd: 0.7 }), side)).toMatchObject({ territory: "CONTESTED", rival: "Ben & Jerry's" });
+    expect(judge(scores({ judes: 0.8, bj: 0.85, hd: 0.94 }), side)).toMatchObject({ territory: "THEIRS", rival: "Häagen-Dazs" });
+  });
+
+  it("prefers the tag where one side is clearly ahead", () => {
+    const pick = clearest([
+      { name: "a", judged: { territory: "CONTESTED" as const, rival: "x", gap: 0.02 } },
+      { name: "b", judged: null },
+      { name: "c", judged: { territory: "YOURS" as const, rival: null, gap: 0.05 } },
+    ]);
+    expect(pick?.name).toBe("c");
+  });
+
+  it("cleans and de-duplicates cues", () => {
+    expect(uniqueCues({ shots: [{ index: 0, cues: ["Cozy", "family  dinner"] }, { index: 1, cues: ["cozy"] }], whole: ["Playful"] })).toEqual(["cozy", "family dinner", "playful"]);
+  });
+});
+
+describe("ad check: the verdict in words", () => {
+  const placed = (entries: [string, "YOURS" | "THEIRS" | "CONTESTED" | null, string | null][]) =>
+    new Map(entries.map(([cue, territory, rival]) => [cue, { cue, tag: null, judged: territory ? { territory, rival, gap: 0.1 } : null }]));
+  const shots = [{ index: 0, cues: ["cozy", "playful"] }, { index: 1, cues: ["cozy", "skateboarding"] }, { index: 2, cues: ["dog walking"] }];
+
+  it("reads as yours when your cues outweigh theirs", () => {
+    const v = verdictFrom(placed([["cozy", "YOURS", null], ["playful", "YOURS", null], ["skateboarding", "THEIRS", "Ben & Jerry's"], ["dog walking", null, null]]), shots);
+    expect(v.lean).toBe("yours");
+    expect(v.headline).toBe("This ad reads as yours: cozy and playful are what your customers are into.");
+    expect(v.reshoot).toEqual(['Shot 2: "skateboarding" pulls toward Ben & Jerry\'s.']);
+    expect(v.notes[0]).toBe("Qloo has no read on dog walking.");
+  });
+
+  it("names the rival an ad leans toward", () => {
+    const v = verdictFrom(placed([["cozy", "THEIRS", "Häagen-Dazs"], ["playful", "THEIRS", "Häagen-Dazs"], ["skateboarding", "YOURS", null]]), shots);
+    expect(v).toMatchObject({ lean: "theirs", rival: "Häagen-Dazs" });
+    expect(v.headline).toContain("leans toward Häagen-Dazs");
+  });
+
+  it("describes named references without doubling a brand's possessive", () => {
+    const v = verdictFrom(placed([["cozy", "YOURS", null]]), shots, [
+      { name: "Ben & Jerry's", territory: "THEIRS", rival: "Ben & Jerry's" },
+      { name: "Glastonbury", territory: "THEIRS", rival: "Ben & Jerry's" },
+      { name: "Bath", territory: "YOURS", rival: null },
+      { name: "Paris", territory: null, rival: null },
+    ]);
+    expect(v.references.map((r) => r.says)).toEqual(["your rival", "closer to Ben & Jerry's", "yours", "not on your map"]);
+  });
+
+  it("is honest when Qloo has nothing to go on, and never shows a score", () => {
+    const v = verdictFrom(placed([["dog walking", null, null]]), shots);
+    expect(v.lean).toBe("unclear");
+    for (const text of [v.headline, ...v.notes]) expect(text).not.toMatch(/\d|%/);
+  });
+});
+
+describe.skipIf(!qlooEnabled())("ad check: placing on a real map (Qloo)", () => {
+  it("places cues for Jude's against Ben & Jerry's and Häagen-Dazs", async () => {
+    const side = {
+      you: ["A7E5D953-CC71-4A14-9424-5C8195835048", "6B62EE34-63B6-45EB-B4D0-002EB0455D16", "010427F3-38F8-4F64-8417-E4CE4C9AF209"],
+      rivals: [{ id: "860395D4-48E2-4B47-991F-50109D19D6FC", name: "Ben & Jerry's" }, { id: "8C3F520D-D32C-482B-BD41-C291108E0297", name: "Häagen-Dazs" }],
+    };
+    const adId = `test-place-${randomUUID().slice(0, 8)}`;
+    const placed = await placeCues(["cozy", "skateboarding"], side, { feature: "AD_CHECK", adId });
+    expect(placed.get("cozy")?.judged?.territory).toBe("YOURS");
+    expect(placed.get("skateboarding")?.judged).toMatchObject({ territory: "THEIRS", rival: "Ben & Jerry's" });
+    expect(await prisma.aiCall.count({ where: { adId, provider: "qloo" } })).toBe(2);
+    await prisma.aiCall.deleteMany({ where: { adId } });
+  }, 180_000);
 });
 
 // ── Routes and the worker, end to end (practice Gemini, real Vercel Blob) ───────────────────────
@@ -207,6 +291,8 @@ describe.skipIf(!endToEnd)("ad check: upload, read, play, delete", () => {
     expect(ad.shots).toHaveLength(3);
     expect(ad.shots.every((s) => s.description)).toBe(true);
     expect(ad.elements.some((e) => e.kind === "ONSCREEN_TEXT")).toBe(true);
+    // This workspace has no map, so there's nothing to compare with yet.
+    expect((ad as unknown as { check: unknown }).check).toBeNull();
 
     const calls = await prisma.aiCall.findMany({ where: { adId } });
     expect(calls.map((c) => c.stage).sort()).toEqual(["audio", "context", "shot", "shot", "shot", "text"]);
@@ -234,6 +320,14 @@ describe.skipIf(!endToEnd)("ad check: upload, read, play, delete", () => {
     const { ad } = (await (await call("owner", "GET", `/api/v1/orgs/${workspaceId}/ads/${adId}`)).json()) as { ad: { hasVideo: boolean; shots: unknown[] } };
     expect(ad).toMatchObject({ hasVideo: false });
     expect(ad.shots).toHaveLength(3);
+  });
+
+  it("deletes a cancelled upload's file too (its suffixed name was never saved)", async () => {
+    const clip = makeClip();
+    const created = (await (await call("owner", "POST", `/api/v1/orgs/${workspaceId}/ads`, { fileName: "cancelled.mp4", sizeBytes: clip.length, contentType: "video/mp4" })).json()) as { adId: string; pathname: string; clientToken: string; access: "private" | "public" };
+    const uploaded = await put(created.pathname, clip, { access: created.access, token: created.clientToken, contentType: "video/mp4" });
+    expect((await call("owner", "DELETE", `/api/v1/orgs/${workspaceId}/ads/${created.adId}`)).status).toBe(204);
+    expect(await describeBlob(uploaded.pathname)).toBeNull();
   });
 
   it("deletes the whole check", async () => {

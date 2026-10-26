@@ -64,8 +64,16 @@ const summary = {
 } as const;
 
 export async function listAds(workspaceId: string) {
-  const ads = await prisma.ad.findMany({ where: { workspaceId, status: { not: "UPLOADING" } }, orderBy: { createdAt: "desc" }, take: 100, select: summary });
-  return ads.map(({ _count, videoDeletedAt, ...ad }) => ({ ...ad, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt }));
+  const ads = await prisma.ad.findMany({
+    where: { workspaceId, status: { not: "UPLOADING" } },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: { ...summary, checks: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true } } },
+  });
+  return ads.map(({ _count, videoDeletedAt, checks, ...ad }) => {
+    const verdict = checks[0]?.verdict as { lean?: string; rival?: string | null; headline?: string } | undefined;
+    return { ...ad, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt, lean: verdict?.lean ?? null, rival: verdict?.rival ?? null, headline: verdict?.headline ?? null };
+  });
 }
 
 export async function adDetail(workspaceId: string, adId: string) {
@@ -76,11 +84,12 @@ export async function adDetail(workspaceId: string, adId: string) {
       rivals: true,
       shots: { orderBy: { index: "asc" }, select: { index: true, startMs: true, endMs: true, description: true, territory: true } },
       elements: { orderBy: [{ startMs: "asc" }, { kind: "asc" }], select: { id: true, kind: true, raw: true, detail: true, startMs: true, endMs: true, territory: true } },
+      checks: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, mapId: true, verdict: true, createdAt: true } },
     },
   });
   if (!ad) throw new HttpError(404, "We couldn't find that ad check.");
-  const { _count, videoDeletedAt, ...rest } = ad;
-  return { ...rest, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt };
+  const { _count, videoDeletedAt, checks, ...rest } = ad;
+  return { ...rest, check: checks[0] ?? null, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt };
 }
 
 /** Where the video is, for streaming. 410 once deleted. */
