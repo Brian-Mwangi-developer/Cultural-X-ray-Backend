@@ -9,10 +9,17 @@ const UNAVAILABLE = "Brand search isn't available right now. You can still add y
 /** True when Qloo is configured; routes check this to explain rather than fail. */
 export const qlooEnabled = () => Boolean(config.qloo.apiKey);
 
-/** Lookups wait at most 12 s (a person is typing); map builds run in the worker and can wait longer. */
+/**
+ * Lookups (a person is typing) get two tries of 9 s, so an answer, or a plain "taking longer" message,
+ * always comes back before the web's proxy gives up at 30 s. Measured 28 October: Qloo's town search
+ * took 2–30 s per new query, and three 12 s tries ran past the proxy as a bare 502. Map builds and the
+ * worker pass their own, longer budget.
+ */
 export type QlooOptions = { timeoutMs?: number; tries?: number };
 
-async function call(path: string, params: Record<string, string | number>, { timeoutMs = 12_000, tries = 3 }: QlooOptions): Promise<unknown> {
+const SLOW = "Search is taking longer than usual. Keep typing, or try again in a moment.";
+
+async function call(path: string, params: Record<string, string | number>, { timeoutMs = 9_000, tries = 2 }: QlooOptions): Promise<unknown> {
   const query = new URLSearchParams(Object.entries(params).map(([k, v]): [string, string] => [k, String(v)]));
   const url = `${config.qloo.base}${path}?${query}`;
   for (let attempt = 1; ; attempt++) {
@@ -31,8 +38,10 @@ async function call(path: string, params: Record<string, string | number>, { tim
     } catch (error) {
       if (error instanceof HttpError) throw error;
       if (attempt < tries) continue;
-      logger.warn({ path, ...errorDetails(error) }, "qloo unreachable");
-      throw new HttpError(502, UNAVAILABLE, { code: "LOOKUP_UNAVAILABLE" });
+      const timedOut = error instanceof DOMException && error.name === "TimeoutError";
+      logger.warn({ path, timedOut, ...errorDetails(error) }, timedOut ? "qloo too slow" : "qloo unreachable");
+      // 408 rather than 5xx: the web shows our words for 4xx, and this is worth saying plainly.
+      throw timedOut ? new HttpError(408, SLOW, { code: "LOOKUP_SLOW" }) : new HttpError(502, UNAVAILABLE, { code: "LOOKUP_UNAVAILABLE" });
     }
   }
 }

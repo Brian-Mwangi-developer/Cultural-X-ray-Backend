@@ -34,7 +34,7 @@ export async function enrichPeople(entityIds: string[]) {
   const fresh = await prisma.creatorProfile.findMany({ where: { entityId: { in: entityIds }, checkedAt: { gt: new Date(Date.now() - RECHECK_DAYS * 86_400_000) } }, select: { entityId: true } });
   const todo = entityIds.filter((id) => !fresh.some((f) => f.entityId === id));
   if (!todo.length) return 0;
-  const body = await qloo<{ results?: QlooPerson[] }>("/entities", { entity_ids: todo.join(",") }, TTL.record);
+  const body = await qloo<{ results?: QlooPerson[] }>("/entities", { entity_ids: todo.join(",") }, TTL.record, { timeoutMs: 30_000, tries: 3 });
   const people = body.results ?? [];
   let found = 0;
   for (let i = 0; i < people.length; i += AT_ONCE) {
