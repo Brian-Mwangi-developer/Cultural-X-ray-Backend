@@ -15,6 +15,7 @@ import { fromShotNumbers, KINDS as RECUT_KINDS, practiceRecuts, readOfRecut, typ
 import { download } from "@/modules/adcheck/storage";
 import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
 import type { Attribution } from "@/modules/usage/ai-calls";
+import { withMeter } from "@/modules/usage/meter";
 
 /**
  * Reading an ad in the worker: download → normalise → shots → context, text and sound (fast model)
@@ -128,7 +129,7 @@ async function read(adId: string, attempt: number) {
   ]);
 
   await setStage(adId, "placing on your map");
-  const verdict = await placeOnMap(adId, ad.workspaceId, ad.rivals, context.json, audio.json, shots, described, who);
+  const verdict = await withMeter({ workspaceId: ad.workspaceId, kind: "AD_CHECK", userId: who.userId ?? null }, () => placeOnMap(adId, ad.workspaceId, ad.rivals, context.json, audio.json, shots, described, who));
   // The re-cuts are a bonus on top of the read: if writing them fails, the check is still ready.
   await setStage(adId, "writing re-cuts");
   await writeRecuts(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "ad check: re-cuts not written"));

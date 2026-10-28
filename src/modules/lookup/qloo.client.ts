@@ -2,6 +2,7 @@ import { config } from "@/config/env";
 import { HttpError } from "@/http/errors";
 import { errorDetails, logger } from "@/observability/logger";
 import { cached } from "@/modules/lookup/cache";
+import { recordQlooCall } from "@/modules/usage/meter";
 
 const UNAVAILABLE = "Brand search isn't available right now. You can still add your brand by name.";
 
@@ -39,5 +40,14 @@ async function call(path: string, params: Record<string, string | number>, { tim
 /** A cached GET against Qloo. Answers are stored in Redis and Postgres for `ttlSeconds`. */
 export async function qloo<T = Record<string, unknown>>(path: string, params: Record<string, string | number>, ttlSeconds: number, options: QlooOptions = {}): Promise<T> {
   if (!qlooEnabled()) throw new HttpError(503, UNAVAILABLE, { code: "LOOKUP_DISABLED" });
-  return cached(path, params, ttlSeconds, () => call(path, params, options)) as Promise<T>;
+  // Only a call that goes out to Qloo counts against the account; our cache answers for free.
+  let fetched = false;
+  try {
+    return (await cached(path, params, ttlSeconds, () => {
+      fetched = true;
+      return call(path, params, options);
+    })) as T;
+  } finally {
+    void recordQlooCall(path, !fetched);
+  }
 }

@@ -17,6 +17,7 @@ import {
   searchPlaces,
 } from "@/modules/lookup/lookup.service";
 import { siteReadStatus, startSiteRead } from "@/modules/lookup/site";
+import { meterLookups } from "@/modules/usage/meter";
 
 export const lookupRouter = Router();
 
@@ -34,7 +35,7 @@ async function lookupLimit(req: Request, _res: Response, next: NextFunction) {
   }
 }
 
-const guard = [requireAuth, lookupLimit];
+const guard = [requireAuth, lookupLimit, meterLookups];
 const market = z.enum(["GB", "US"]).default("GB");
 const text = (min = 2) => z.string().trim().min(min, "Type a little more.").max(120, "That's too long to search.");
 

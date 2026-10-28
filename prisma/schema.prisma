@@ -66,6 +66,7 @@ enum UsageKind {
   MAP_BUILD
   AD_CHECK
   PLAYS
+  LOOKUP
   BRIEF
   LOCALIZE
   OTHER
@@ -516,6 +517,10 @@ model UsageLedger {
   kind        UsageKind
   calls       Int
   cacheHits   Int          @default(0)
+  /// Who started the work, when a person did (map builds, filtered views, lookups).
+  userId      String?
+  /// The Qloo endpoint, e.g. "/v2/insights".
+  path        String?
   createdAt   DateTime     @default(now())
 
   @@index([payerId, createdAt])
