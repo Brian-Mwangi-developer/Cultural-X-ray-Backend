@@ -96,3 +96,11 @@ Not included: Qloo, storage, email, hosting, or a fingerprinting service for the
 - **Schema complexity.** A list capped at 40 whose items carry ranged numbers (`minimum`/`maximum`) was rejected with a bare 400; number ranges are no longer sent (zod still checks the answer).
 - **Silence.** On a silent ad Gemini invented a voice-over and music. The worker measures loudness first (ffmpeg `volumedetect`, peak below −50 dB is silence) and skips the audio pass.
 - **Measured live (26 October):** a 24-second, 6-shot silent draft cost **$0.023** on 3.8 Flash for every pass (context, text, six shots, cues) and read in 91 s, most of it Qloo placement.
+
+## Town search data
+
+Onboarding's town search reads `src/modules/lookup/towns.data.json`: UK and US places with 1,000+
+people from [GeoNames](https://www.geonames.org) (`cities1000` and `admin1CodesASCII`), licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Rebuild it with
+`python3 -I scripts/build-towns.py <folder with both files>`. It replaced Qloo's locality search,
+which took 2–30 s per query and sometimes ran past the proxy's 30 s limit.

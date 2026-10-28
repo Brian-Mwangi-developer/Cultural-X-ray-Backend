@@ -1,4 +1,5 @@
 import { prisma } from "@/infra/database";
+import { searchTowns } from "@/modules/lookup/towns";
 import { errorDetails, logger } from "@/observability/logger";
 import { TTL } from "@/modules/lookup/cache";
 import { qloo } from "@/modules/lookup/qloo.client";
@@ -95,14 +96,9 @@ export async function searchBrands(query: string) {
 }
 
 /** Towns and cities in the workspace's market, for finding a shop. Never trusts a bare name: "Brighton" is also in the US. */
+/** Towns in the market, for onboarding (towns.ts: a local list, so no wait on Qloo and no cost). */
 export async function searchLocalities(query: string, market: Market) {
-  const country = countryName(market) === "United States" ? "United States of America" : countryName(market);
-  // Naming the country in the query ranks its towns first; the filter below drops the rest.
-  const results = await searchRecords(`${query}, ${country}`, "urn:entity:locality", {}, 12);
-  return results
-    .filter((r) => String((r as { disambiguation?: string }).disambiguation ?? "").includes(country))
-    .slice(0, 6)
-    .map((r) => ({ id: r.entity_id, name: r.name, detail: (r as { disambiguation?: string }).disambiguation ?? "", location: r.location }));
+  return searchTowns(query, market);
 }
 
 /** Shops, cafés and restaurants near a point. */
