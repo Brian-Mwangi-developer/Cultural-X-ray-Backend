@@ -19,6 +19,7 @@ import { playsRouter } from "@/modules/plays/plays.routes";
 import { usageRouter } from "@/modules/usage/usage.routes";
 import { askRouter } from "@/modules/ask/ask.routes";
 import { adCheckRouter } from "@/modules/adcheck/adcheck.routes";
+import { guideRouter } from "@/modules/guide/guide.routes";
 
 export function createApp(): Express {
   const app = express();
@@ -40,7 +41,7 @@ export function createApp(): Express {
   app.all("/api/auth/*splat", toNodeHandler(auth));
 
   app.use(express.json({ limit: "1mb" }));
-  app.use("/api/v1", createApiRateLimit(), meRouter, orgsRouter, connectionsRouter, lookupRouter, mapsRouter, playsRouter, usageRouter, askRouter, adCheckRouter);
+  app.use("/api/v1", createApiRateLimit(), meRouter, orgsRouter, connectionsRouter, lookupRouter, mapsRouter, playsRouter, usageRouter, askRouter, adCheckRouter, guideRouter);
   app.use("/api/v1/ops", opsRouter);
 
   app.use(notFound);

@@ -256,6 +256,7 @@ model User {
   notifications      Notification[]
   pins               Pin[]
   auditEvents        AuditEvent[]
+  guideMarks         GuideMark[]
 
   @@unique([email])
   @@map("user")
@@ -308,6 +309,22 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+/// What a person has seen or chosen in the guide that leaves no other trace: the welcome room, the
+/// goal they picked, a page's tour, the bar folded, their last visit. Progress itself is read from real
+/// data (a ready map, a read ad, a teammate), never stored. `workspaceId` is "" for marks about the
+/// person (welcome, goal) so the unique key works.
+model GuideMark {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String   @default("")
+  key         String
+  at          DateTime @default(now())
+
+  @@unique([userId, workspaceId, key])
+  @@map("guide_mark")
 }
 
 model UserPreference {

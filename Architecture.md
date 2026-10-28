@@ -605,3 +605,14 @@ Calls outside any account (the first steps of onboarding, before there is one) a
 - a breakdown by kind and by workspace.
 
 The sidebar meter and Settings › Usage read it. The meter reads again on every navigation, and when a filtered map view finishes (`xray:usage` event). Going over the allowance is shown, not blocked: nothing stops mid-build. Counting started on 28 October 2026; nothing before that was backfilled.
+
+## 20. The guide (`src/modules/guide`)
+
+Steps a person still has to take, ticked by what is true, never by clicking (plan-guide.md).
+
+| File | Does |
+|---|---|
+| `guide.steps.ts` | Pure: facts → steps (owner: map, read the map, plays, an ad read, a teammate; agency: a client, a client's map, a teammate, per-client access) and the next one, with the welcome goal first once the map is ready. "by" names the agency when its people built the map or read the ad; "busy" while the map builds. Tested in `tests/guide.test.ts`. |
+| `guide.service.ts` | Facts from the database plus `guide_mark` (what leaves no trace: `seen:*`, `tour:*`, `bar:folded`, `visit`; and per person `welcome`, `goal:*` under workspace ""). "Since …" news compares maps, plays and ads with the last `visit` after 6 hours away. Writes are separate statements: an interactive transaction to Neon timed out before starting. |
+| `guide.routes.ts` | `GET/PUT /me/guide` (welcome room), `GET /orgs/:id/guide`, `PUT /orgs/:id/guide/marks` (`workspaceAccess`, so an agency member gets their own marks on a client). Mark keys are checked against a pattern. |
+
