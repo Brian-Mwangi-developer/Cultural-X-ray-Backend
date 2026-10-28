@@ -3,6 +3,8 @@ import { HttpError } from "@/http/errors";
 import { prisma } from "@/infra/database";
 import { errorDetails, logger } from "@/observability/logger";
 import { enqueueAdCheck, enqueueRecut } from "@/modules/adcheck/adcheck.queue";
+import { craftFindings, type Placement } from "@/modules/adcheck/adcheck.craft";
+import type { Fit } from "@/modules/adcheck/adcheck.fit";
 import { describe, remove, storageReady, uploadedPath, uploadToken, VIDEO_TYPES, videoPath } from "@/modules/adcheck/storage";
 
 /** Ad checks for one workspace: create and upload, start reading, read back, delete. */
@@ -82,6 +84,7 @@ export async function adDetail(workspaceId: string, adId: string) {
     select: {
       ...summary,
       rivals: true,
+      workspace: { select: { name: true } },
       shots: { orderBy: { index: "asc" }, select: { index: true, startMs: true, endMs: true, description: true, territory: true } },
       elements: { orderBy: [{ startMs: "asc" }, { kind: "asc" }], select: { id: true, kind: true, raw: true, detail: true, startMs: true, endMs: true, territory: true } },
       checks: {
@@ -92,8 +95,31 @@ export async function adDetail(workspaceId: string, adId: string) {
     },
   });
   if (!ad) throw new HttpError(404, "We couldn't find that ad check.");
-  const { _count, videoDeletedAt, checks, ...rest } = ad;
-  return { ...rest, check: checks[0] ?? null, shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt };
+  const { _count, videoDeletedAt, checks, workspace, ...rest } = ad;
+  const check = checks[0] ?? null;
+  return { ...rest, check, craft: check ? craftOf(ad, workspace.name, check.verdict as { fit?: Fit } | null) : [], shotCount: _count.shots, hasVideo: !videoDeletedAt, videoDeletedAt };
+}
+
+/** What would hold the ad back where it runs (adcheck.craft.ts), from what the check measured. */
+function craftOf(
+  ad: { width: number | null; height: number | null; placements: string[]; durationMs: number | null; shots: { index: number; startMs: number }[]; elements: { kind: string; raw: string; detail: unknown; startMs: number }[] },
+  brand: string,
+  verdict: { fit?: Fit } | null,
+) {
+  const first = verdict?.fit?.productFirstShot;
+  return craftFindings({
+    width: ad.width,
+    height: ad.height,
+    durationMs: ad.durationMs ?? 0,
+    placements: ad.placements as Placement[],
+    brand,
+    // Fit checks from before productFirstShot existed can't say when the product appears.
+    productKnown: typeof first === "number",
+    productAtMs: first ? ad.shots.find((s) => s.index === first - 1)?.startMs ?? null : null,
+    onScreen: ad.elements.filter((e) => e.kind === "ONSCREEN_TEXT").map((e) => ({ text: e.raw, kind: String((e.detail as { kind?: string } | null)?.kind ?? "other"), startMs: e.startMs })),
+    spokenLines: ad.elements.filter((e) => e.kind === "SCRIPT").length,
+    hasSound: ad.elements.some((e) => e.kind === "SCRIPT" || e.kind === "SOUND"),
+  });
 }
 
 /** Ask the worker to (re)write the suggested re-cuts of a read ad. The ad's stage says so until they land. */

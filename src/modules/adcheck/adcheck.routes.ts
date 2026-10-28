@@ -4,6 +4,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { HttpError } from "@/http/errors";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
+import { basisOf } from "@/modules/maps/map.basis";
 import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
 import { adDetail, createAd, deleteAd, deleteVideo, listAds, PLACEMENTS, requestRecuts, startAd, videoOf } from "@/modules/adcheck/adcheck.service";
@@ -58,7 +59,7 @@ adCheckRouter.get("/orgs/:id/ads/:adId", requireAuth, async (req, res, next) => 
   try {
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
-    res.set("Cache-Control", "no-store").json({ ad: await adDetail(organization.id, String(req.params.adId)) });
+    res.set("Cache-Control", "no-store").json({ ad: await adDetail(organization.id, String(req.params.adId)), basis: await basisOf(organization.id) });
   } catch (error) {
     next(error);
   }

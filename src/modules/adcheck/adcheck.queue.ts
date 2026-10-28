@@ -257,9 +257,9 @@ const writeRecutsJob: Handler<typeof recutJob> = {
     if (!ad || ad.status !== "READY") return Outcome.Skipped;
     try {
       const who = { feature: "AD_CHECK" as const, userId: userId ?? null, workspaceId: ad.workspaceId, adId };
-      // Ads checked before the fit check existed get it now.
+      // Ads checked before the fit check (or before it timed the product) get it now.
       const latest = await prisma.adCheck.findFirst({ where: { adId }, orderBy: { createdAt: "desc" }, select: { verdict: true } });
-      if (latest && !(latest.verdict as { fit?: unknown } | null)?.fit) await checkFit(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "re-cuts: fit not checked"));
+      if (latest && typeof (latest.verdict as { fit?: { productFirstShot?: number } } | null)?.fit?.productFirstShot !== "number") await checkFit(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "re-cuts: fit not checked"));
       const n = await writeRecuts(adId, who);
       logger.info({ adId, recuts: n }, "re-cuts written");
       return Outcome.Processed;

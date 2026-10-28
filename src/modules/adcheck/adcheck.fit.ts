@@ -22,6 +22,8 @@ export const fitSchema = z.object({
   fits: z.enum(["yes", "partly", "no"]),
   /** Brand names or logos seen or heard that aren't this business. */
   otherBrands: z.array(words(80)).max(6),
+  /** The shot (numbered from 1) where the business's product is first clearly shown; 0 if never. */
+  productFirstShot: z.number().int(),
   /** Whether the business's own name appears or is said. */
   nameShown: z.boolean(),
   /** Does the ad say what the business offers? clear, vague (could be anyone's), or missing. */
@@ -69,6 +71,7 @@ export function fitPrompt(b: Business, f: AdFacts) {
     `Answer, as a straight-talking creative director would to the owner of ${b.name}:`,
     `- adShows: what product or service the ad actually shows or offers.`,
     `- fits: "yes" if ${b.sells ?? "what the business sells"} is clearly the subject; "partly" if it's there but late, small or unclear; "no" if the ad shows something else (a different product or category).`,
+    `- productFirstShot: the number of the first shot where ${b.sells ?? "the product"} is clearly shown; 0 if it never is.`,
     `- otherBrands: names or logos of any brand that isn't ${b.name} (never list ${b.name} itself).`,
     `- nameShown: whether ${b.name}'s own name is seen or said.`,
     `- message: "clear" if a viewer would know what ${b.name} offers and why it's worth trying; "vague" if the ad could be for anyone in the category; "missing" if it never says.`,
@@ -83,6 +86,7 @@ export function fitPrompt(b: Business, f: AdFacts) {
 export const practiceFit = (b: Business): Fit => ({
   adShows: b.sells ?? "the product",
   fits: "yes",
+  productFirstShot: 1,
   otherBrands: [],
   nameShown: true,
   message: "clear",
