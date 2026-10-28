@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { candidates, channelFromPage, matchOf, videosFromFeed } from "@/modules/creators/platforms";
-import { keepBacked, type PlayContext, type PlayItem, playsPrompt, playsSchema, practicePlays, proofOf } from "@/modules/plays/plays";
+import { customersWord, keepBacked, type PlayContext, type PlayItem, playsPrompt, playsSchema, practicePlays, proofOf } from "@/modules/plays/plays";
 
 const item = (ref: string, name: string, kind: PlayItem["kind"], label: PlayItem["label"], p: Partial<PlayItem> = {}): PlayItem => ({ ref, entityId: `e-${ref}`, name, kind, label, rival: null, lean: null, rank: 0, detail: null, ...p });
 // Jude's map, as it reads: bakers and gardeners are yours, a comedian is shared, Japanese stars are Häagen-Dazs'.
@@ -53,6 +53,24 @@ describe("plays: only what the map backs", () => {
   it("explains each source in words, with no scores", () => {
     expect(proofOf(CTX.items[1]!, CTX.rivals)).toBe("Tom Kerridge is 2nd among the creators your customers follow on Qloo, and Ben & Jerry's or Häagen-Dazs’ customers don’t rank it.");
     expect(proofOf(CTX.items[2]!, CTX.rivals)).toBe("Joe Lycett is 3rd among the creators your customers follow on Qloo. Ben & Jerry's customers rank it too, and it sits higher on your customers’ list.");
+  });
+});
+
+describe("plays: a brand Qloo doesn't know", () => {
+  const NEW: PlayContext = { ...CTX, brand: "O'liery Pizza", through: ["McDonald's", "KFC", "Burger King"] };
+
+  it("tells Gemini whose customers these really are, and asks for tests", () => {
+    const p = playsPrompt(NEW);
+    expect(p).toContain("Qloo doesn't know O'liery Pizza yet");
+    expect(p).toContain(`Say "McDonald's, KFC and Burger King customers"`);
+    expect(p).toMatch(/a test a new brand can run/);
+  });
+
+  it("says so in every source's words", () => {
+    expect(customersWord(NEW.through)).toBe("McDonald's, KFC and Burger King customers");
+    expect(customersWord(null)).toBe("your customers");
+    const [row] = keepBacked({ plays: [{ items: ["i1"], title: "t", body: "b", why: "w", brief: [] }] }, NEW);
+    expect(row!.items[0]!.proof).toBe("Nadiya Hussain is 1st among the creators McDonald's, KFC and Burger King customers follow on Qloo, and Ben & Jerry's or Häagen-Dazs’ customers don’t rank it.");
   });
 });
 

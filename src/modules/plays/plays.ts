@@ -19,7 +19,12 @@ export const PLAY_OF: Record<Kind, PlayKind | null> = {
 
 /** One map item as the prompt and the checks see it. `ref` is how Gemini names it ("i12"). */
 export type PlayItem = { ref: string; entityId: string; name: string; kind: Kind; label: Label; rival: string | null; lean: number | null; rank: number; detail: string | null };
-export type PlayContext = { brand: string; market: Market; rivals: string[]; readings: { kind: Kind; text: string }[]; items: PlayItem[] };
+/** `through`: when Qloo doesn't know the brand, the brands its map is read through (see maps/map.basis.ts). */
+export type PlayContext = { brand: string; market: Market; rivals: string[]; through?: string[] | null; readings: { kind: Kind; text: string }[]; items: PlayItem[] };
+
+const names = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+/** Whose lists these are: the brand's own customers, or (for a brand Qloo doesn't know) the customers of the brands it's read through. */
+export const customersWord = (through?: string[] | null) => (through?.length ? `${names(through)} customers` : "your customers");
 
 const words = (max: number) => z.string().trim().min(1).max(max);
 
@@ -51,18 +56,19 @@ const ordinal = (n: number) => {
 export const possessive = (name: string) => (/['’]s$/i.test(name) ? name : /s$/i.test(name) ? `${name}’` : `${name}’s`);
 
 /** The words for an item's tooltip. No scores: where it ranks for your customers and whose it is. */
-export function proofOf(item: PlayItem, rivals: string[]): string {
+export function proofOf(item: PlayItem, rivals: string[], through?: string[] | null): string {
   const c = categoryOf(item.kind);
-  const list = `the ${c?.noun ?? "things"} your customers ${c?.verb ?? "like"} on Qloo`;
+  const who = customersWord(through);
+  const list = `the ${c?.noun ?? "things"} ${who} ${c?.verb ?? "like"} on Qloo`;
   if (item.label === "YOURS") {
     const others = rivals.length ? rivals.map(possessive).join(" or ") + " customers" : "your rivals’ customers";
     return `${item.name} is ${ordinal(item.rank + 1)} among ${list}, and ${others} don’t rank it.`;
   }
   if (item.label === "CONTESTED") {
-    const lean = item.lean == null ? "" : item.lean >= 0.55 ? ", and it sits higher on your customers’ list" : item.lean <= 0.45 ? ", and it sits higher on theirs" : "";
+    const lean = item.lean == null ? "" : item.lean >= 0.55 ? `, and it sits higher on ${who}’ list` : item.lean <= 0.45 ? ", and it sits higher on theirs" : "";
     return `${item.name} is ${ordinal(item.rank + 1)} among ${list}. ${item.rival ? possessive(item.rival) : "A rival’s"} customers rank it too${lean}.`;
   }
-  return `${item.name} belongs to ${item.rival ? possessive(item.rival) : "a rival’s"} customers, not yours.`;
+  return `${item.name} belongs to ${item.rival ? possessive(item.rival) : "a rival’s"} customers, not ${who}.`;
 }
 
 const LABEL_WORDS: Record<Label, string> = { YOURS: "only yours", CONTESTED: "shared", THEIRS: "theirs" };
@@ -81,7 +87,9 @@ export function playsPrompt(c: PlayContext) {
   });
   return [
     `You are a brand strategist for ${c.brand}, in the ${c.market === "GB" ? "UK" : "US"} market. Its rivals are ${c.rivals.join(" and ") || "unknown"}.`,
-    `Below is ${c.brand}'s Culture Map from Qloo: what its customers listen to, watch, follow, visit and buy, in order (first is strongest), and whether each is only theirs, shared with a rival, or only a rival's.`,
+    c.through?.length
+      ? `Qloo doesn't know ${c.brand} yet: it is a new or small brand. So its Culture Map below is read through the customers of ${names(c.through)}, brands like it: what those people listen to, watch, follow, visit and buy, in order (first is strongest), and whether each is only theirs, shared with a rival, or only a rival's. They are a stand-in for ${c.brand}'s future customers, not its customers. Say "${customersWord(c.through)}" (never "${c.brand}'s customers" or "your customers"), and write each play as a test a new brand can run.`
+      : `Below is ${c.brand}'s Culture Map from Qloo: what its customers listen to, watch, follow, visit and buy, in order (first is strongest), and whether each is only theirs, shared with a rival, or only a rival's.`,
     "",
     ...sections.flatMap((s) => [s, ""]),
     `Write up to ${MAX_PLAYS} plays: concrete moves ${c.brand} could make this month to reach its customers where rivals aren't.`,
@@ -162,7 +170,7 @@ export function keepBacked(answer: PlaysAnswer, c: PlayContext): PlayRow[] {
       brief: p.brief,
       rank: rows.length,
       entityId: first.entityId,
-      items: items.map((i) => ({ entityId: i.entityId, name: i.name, kind: i.kind, label: i.label, rival: i.rival, proof: proofOf(i, c.rivals) })),
+      items: items.map((i) => ({ entityId: i.entityId, name: i.name, kind: i.kind, label: i.label, rival: i.rival, proof: proofOf(i, c.rivals, c.through) })),
     });
     if (rows.length >= MAX_PLAYS) break;
   }

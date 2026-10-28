@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { creatorDetail, creatorsFor, outreachDraft } from "@/modules/creators/creators.service";
+import { basisOf } from "@/modules/maps/map.basis";
 import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
 import { listPlays, playDetail, requestPlays } from "@/modules/plays/plays.service";
@@ -15,7 +16,7 @@ playsRouter.get("/orgs/:id/plays", requireAuth, async (req, res, next) => {
   try {
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
-    res.set("Cache-Control", "no-store").json(await listPlays(organization.id));
+    res.set("Cache-Control", "no-store").json({ ...(await listPlays(organization.id)), basis: await basisOf(organization.id) });
   } catch (error) {
     next(error);
   }
@@ -39,7 +40,7 @@ playsRouter.get("/orgs/:id/plays/:playId", requireAuth, async (req, res, next) =
   try {
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
-    res.set("Cache-Control", "no-store").json(await playDetail(organization.id, String(req.params.playId)));
+    res.set("Cache-Control", "no-store").json({ ...(await playDetail(organization.id, String(req.params.playId))), basis: await basisOf(organization.id) });
   } catch (error) {
     next(error);
   }
@@ -51,7 +52,7 @@ playsRouter.get("/orgs/:id/creators", requireAuth, async (req, res, next) => {
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     const play = typeof req.query.play === "string" ? req.query.play : undefined;
-    res.set("Cache-Control", "no-store").json(await creatorsFor(organization.id, play));
+    res.set("Cache-Control", "no-store").json({ ...(await creatorsFor(organization.id, play)), basis: await basisOf(organization.id) });
   } catch (error) {
     next(error);
   }
@@ -61,7 +62,7 @@ playsRouter.get("/orgs/:id/creators/:entityId", requireAuth, async (req, res, ne
   try {
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
-    res.set("Cache-Control", "no-store").json(await creatorDetail(organization.id, String(req.params.entityId)));
+    res.set("Cache-Control", "no-store").json({ ...(await creatorDetail(organization.id, String(req.params.entityId))), basis: await basisOf(organization.id) });
   } catch (error) {
     next(error);
   }
