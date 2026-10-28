@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import { RedisStore, type RedisReply } from "rate-limit-redis";
 import { redis } from "@/infra/redis";
@@ -10,7 +11,12 @@ export function createApiRateLimit() {
     limit: 300,
     standardHeaders: "draft-8",
     legacyHeaders: false,
-    keyGenerator: (req) => ipKeyGenerator(req.ip ?? "unknown"),
+    // Per signed-in session, not per address: the web's server renders every page from one address,
+    // so keyed by IP all its visitors would share one budget and a busy minute would fail pages.
+    keyGenerator: (req) => {
+      const token = req.headers.cookie?.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/)?.[1];
+      return token ? `s:${createHash("sha256").update(token).digest("hex").slice(0, 32)}` : ipKeyGenerator(req.ip ?? "unknown");
+    },
     // Fail open: a Redis outage should slow nothing down, not lock everyone out.
     skip: () => redis.status !== "ready",
     passOnStoreError: true,
