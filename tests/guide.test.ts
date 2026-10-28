@@ -37,3 +37,17 @@ describe("guide: steps ticked by real work", () => {
     expect(["welcome", "goal:ads", "seen:Map", "anything"].some((k) => MARK_KEY.test(k))).toBe(false);
   });
 });
+
+describe("guide: what Ask X-Ray remembers", () => {
+  it("keeps one plain line per note", async () => {
+    const { tidy, FACT_MAX } = await import("@/modules/guide/guide.memory");
+    expect(tidy("  Opening a second shop\n in Leeds in March.  ")).toBe("Opening a second shop in Leeds in March");
+    expect(tidy("x".repeat(400))).toHaveLength(FACT_MAX);
+  });
+
+  it("knows the same note said slightly differently, and not a different one", async () => {
+    const { same } = await import("@/modules/guide/guide.memory");
+    expect(same("Opening a new shop in Leeds in May", "Opening a shop in Leeds in May")).toBe(true);
+    expect(same("Opening a shop in Leeds in May", "Opening a shop in Manchester in May")).toBe(false);
+  });
+});

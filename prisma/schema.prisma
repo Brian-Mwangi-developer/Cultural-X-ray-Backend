@@ -257,6 +257,7 @@ model User {
   pins               Pin[]
   auditEvents        AuditEvent[]
   guideMarks         GuideMark[]
+  guideMemories      GuideMemory[]
 
   @@unique([email])
   @@map("user")
@@ -325,6 +326,23 @@ model GuideMark {
 
   @@unique([userId, workspaceId, key])
   @@map("guide_mark")
+}
+
+/// Short notes Ask X-Ray keeps about a person in one workspace ("Opening in Leeds in March"), so they
+/// don't repeat themselves. The person sees every one in Settings › Profile and can delete them; the
+/// agency never sees a brand's. At most 30 per person per workspace.
+model GuideMemory {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String
+  fact        String
+  /// "said" (told the assistant) or "picked" (chose it, e.g. the welcome goal).
+  source      String   @default("said")
+  createdAt   DateTime @default(now())
+
+  @@index([userId, workspaceId, createdAt])
+  @@map("guide_memory")
 }
 
 model UserPreference {

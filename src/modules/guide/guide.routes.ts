@@ -4,6 +4,7 @@ import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { workspaceAccess } from "@/modules/orgs/access";
 import { GOALS } from "@/modules/guide/guide.steps";
 import { guideOf, MARK_KEY, personOf, setMarks, welcome } from "@/modules/guide/guide.service";
+import { forget, memoriesOf, memoryOn, setMemoryOn } from "@/modules/guide/guide.memory";
 
 export const guideRouter = Router();
 
@@ -55,6 +56,40 @@ guideRouter.put("/orgs/:id/guide/marks", requireAuth, async (req, res, next) => 
     const { add, remove } = marksSchema.parse(req.body);
     await setMarks(user.id, organization.id, add, remove);
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** What Ask X-Ray remembers about this person here, and whether remembering is on (Settings › Profile). */
+guideRouter.get("/orgs/:id/guide/memory", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    const [facts, on] = await Promise.all([memoriesOf(user.id, organization.id), memoryOn(user.id)]);
+    res.set("Cache-Control", "no-store").json({ memory: { on, facts } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+guideRouter.delete("/orgs/:id/guide/memory/:memoryId", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    await forget(user.id, organization.id, String(req.params.memoryId));
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+guideRouter.put("/me/guide/memory", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { on } = z.object({ on: z.boolean() }).parse(req.body);
+    await setMemoryOn(user.id, on);
+    res.json({ on });
   } catch (error) {
     next(error);
   }

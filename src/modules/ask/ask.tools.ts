@@ -3,6 +3,7 @@ import { z } from "zod";
 import { audienceOf, latestMap } from "@/modules/maps/map.service";
 import { CARDS, cardOfPart, JOURNEY_IDS } from "@/modules/guide/guide.cards";
 import { guideOf } from "@/modules/guide/guide.service";
+import { FACT_MAX, remember } from "@/modules/guide/guide.memory";
 import { usageOf } from "@/modules/usage/usage.service";
 
 /**
@@ -164,6 +165,12 @@ export function guideTools(ctx: { userId: string; workspaceId: string; screen: S
         if (card.path !== null && here !== card.path) return { pointed: true, note: `Opening ${card.title} first.` };
         return { pointed: false, note: `That part isn't on the person's screen right now${page === "ad-read" ? " (it's on an ad's own page)" : " (the page may still be loading or have no data yet)"}. Say where it will be instead.` };
       },
+    }),
+    remember: tool({
+      description:
+        "Keep one short, lasting fact the person told you about their business, plans or how they like answers (e.g. 'Opening a second shop in Leeds in March', 'Prefers short answers'). The person sees every note and can delete it. Never keep anything about anyone's health, looks, age, beliefs or other private life, nor passwords or numbers they wouldn't want stored. Don't keep what the map already says.",
+      inputSchema: z.object({ fact: z.string().min(4).max(FACT_MAX) }),
+      execute: async ({ fact }) => remember(ctx.userId, ctx.workspaceId, fact),
     }),
     walk_through: tool({
       description: "Start a short step-by-step walk-through of a page in the person's browser: map (reading the Culture Map), plays, ad (checking an ad), ad-read (reading an ad check). Best for 'how do I use this' questions.",

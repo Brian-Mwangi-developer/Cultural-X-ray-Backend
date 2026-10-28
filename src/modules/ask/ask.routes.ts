@@ -14,8 +14,19 @@ import { practiceModel } from "@/modules/ask/ask.practice";
 import { instructionsFor } from "@/modules/ask/ask.prompt";
 import { type AskMessage, deleteThread, messagesOf, saveMessage, threadFor, threadsOf, threadWithMessages } from "@/modules/ask/ask.service";
 import { askTools } from "@/modules/ask/ask.tools";
+import { IN_PROMPT, memoriesOf, memoryOn } from "@/modules/guide/guide.memory";
+import { personOf } from "@/modules/guide/guide.service";
 
 export const askRouter = Router();
+
+/** The welcome room's goals, as the assistant should read them. */
+const GOAL_WORDS: Record<string, string> = {
+  customers: "knowing who their customers are",
+  places: "picking where to show up",
+  ads: "making ads that land",
+  creators: "finding creators to work with",
+  rival: "taking ground from a rival",
+};
 
 const sendSchema = z.object({
   threadId: z.string().min(1).max(64).optional(),
@@ -72,10 +83,13 @@ askRouter.post("/orgs/:id/ask", requireAuth, async (req, res, next) => {
     // Round trips to the database are slow from far away, so the first words shouldn't wait on
     // more of them than needed: independent reads run together, a new chat has no history to
     // load, and the question is saved while the answer streams.
-    const [threadId, earlier, org] = await Promise.all([
+    const [threadId, earlier, org, notes, person, remembering] = await Promise.all([
       threadFor(organization.id, user.id, input.threadId, question),
       input.threadId ? messagesOf(input.threadId) : Promise.resolve([] as AskMessage[]),
       prisma.organization.findUniqueOrThrow({ where: { id: organization.id }, select: { name: true, markets: true, metadata: true } }),
+      memoriesOf(user.id, organization.id, IN_PROMPT),
+      personOf(user.id),
+      memoryOn(user.id),
     ]);
     const savedQuestion = saveMessage(threadId, question).catch((error) => logger.warn({ threadId, ...errorDetails(error) }, "ask: could not save question"));
     const history = [...earlier, question];
@@ -94,7 +108,7 @@ askRouter.post("/orgs/:id/ask", requireAuth, async (req, res, next) => {
 
     const result = streamText({
       model: chosen.model,
-      instructions: instructionsFor({ brand: org.name, market: org.markets[0] === "US" ? "US" : "UK", rivals: (intent.rivals ?? []).map((r) => r.name), seeds: (intent.seeds ?? []).map((s) => s.name), screen: input.screen ?? null }),
+      instructions: instructionsFor({ brand: org.name, market: org.markets[0] === "US" ? "US" : "UK", rivals: (intent.rivals ?? []).map((r) => r.name), seeds: (intent.seeds ?? []).map((s) => s.name), screen: input.screen ?? null, memory: remembering ? notes.map((n) => n.fact) : [], goal: GOAL_WORDS[person.goal ?? ""] ?? null }),
       messages: await convertToModelMessages(history),
       tools: askTools(organization.id, { userId: user.id, screen: input.screen ?? null }),
       stopWhen: stepCountIs(5),
