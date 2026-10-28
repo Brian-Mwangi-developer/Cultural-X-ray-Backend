@@ -22,6 +22,8 @@ const RATES: Record<string, Rate[]> = {
     { from: "2000-01-01", input: 0.75, cachedInput: 0.075, output: 3.75 },
     { from: "2027-01-01", input: 1.5, cachedInput: 0.15, output: 7.5 },
   ],
+  // Live API, priced at its audio rates (text is cheaper), so voice costs are never under-counted.
+  "gemini-3.8-live": [{ from: "2000-01-01", input: 3, cachedInput: 0.3, output: 12 }],
   "gemini-3.5-flash-lite": [{ from: "2000-01-01", input: 0.3, cachedInput: 0.03, output: 2.5 }],
   "gemini-3.1-flash-lite": [{ from: "2000-01-01", input: 0.25, cachedInput: 0.025, output: 1.5 }],
   "gemini-4-argon": [

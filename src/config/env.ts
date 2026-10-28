@@ -73,6 +73,14 @@ const schema = z.object({
   GOOGLE_VERTEX_API_KEY: z.string().default(""),
   GEMINI_MODEL_FAST: z.string().default("gemini-3.5-flash-lite"),
   GEMINI_MODEL_SMART: z.string().default("gemini-3.8-flash"),
+
+  // Talk to X-Ray: Gemini Live on Vertex, relayed by this API so the key never reaches the browser.
+  // The browser connects with a one-use ticket to VOICE_PUBLIC_URL (Next's proxy doesn't carry WebSockets).
+  VOICE_MODEL: z.string().default("gemini-3.8-live"),
+  VOICE_LOCATION: z.string().default("us-central1"),
+  VOICE_PUBLIC_URL: z.string().default("ws://localhost:4000"),
+  VOICE_DAILY_MINUTES: z.coerce.number().int().min(1).default(15),
+  VOICE_SESSION_MINUTES: z.coerce.number().int().min(1).default(10),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -146,6 +154,13 @@ export const config = {
   },
   blob: { token: env.BLOB_READ_WRITE_TOKEN, access: env.BLOB_ACCESS },
   adCheck: { maxSeconds: env.ADCHECK_MAX_SECONDS, maxBytes: env.ADCHECK_MAX_BYTES, keepDays: env.ADCHECK_KEEP_DAYS },
+  voice: {
+    model: env.VOICE_MODEL,
+    location: env.VOICE_LOCATION,
+    publicUrl: env.VOICE_PUBLIC_URL.replace(/\/+$/, ""),
+    dailyMinutes: env.VOICE_DAILY_MINUTES,
+    sessionMinutes: env.VOICE_SESSION_MINUTES,
+  },
   gemini: {
     provider: env.GEMINI_PROVIDER,
     project: env.GOOGLE_CLOUD_PROJECT,
