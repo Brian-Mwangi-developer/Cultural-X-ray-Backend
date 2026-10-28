@@ -1,6 +1,9 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { audienceOf, latestMap } from "@/modules/maps/map.service";
+import { CARDS, cardOfPart, JOURNEY_IDS } from "@/modules/guide/guide.cards";
+import { guideOf } from "@/modules/guide/guide.service";
+import { usageOf } from "@/modules/usage/usage.service";
 
 /**
  * What Ask X-Ray can do. Two read tools give the model the workspace's map in plain words
@@ -109,8 +112,70 @@ export const tableSchema = z.object({
 
 const shown = async () => ({ shown: true });
 
-export function askTools(workspaceId: string) {
+/** What the person's browser says is on screen as they ask: the page and the guide parts on it. */
+export type Screen = { page: string; parts: string[] };
+
+const PAGES = Object.keys(CARDS) as [string, ...string[]];
+const PART_IDS = Object.values(CARDS).flatMap((c) => c.parts.map((p) => p.id)) as [string, ...string[]];
+
+/**
+ * The guide's hands (plan-guide.md §6). The browser carries them out when the answer arrives (opens
+ * the page, rings the part, runs the walk-through); here each one is checked against what the person
+ * actually has on screen, so the model learns the truth instead of assuming. None of them changes
+ * anything: the person presses.
+ */
+export function guideTools(ctx: { userId: string; workspaceId: string; screen: Screen | null }) {
+  const here = ctx.screen?.page ?? null;
+  const onScreen = new Set(ctx.screen?.parts ?? []);
   return {
+    status: tool({
+      description: "What is true in this workspace right now: the getting-started steps and which are done (and by whom), the next step, and Qloo queries left this month. Call it before telling the person what to do next or whether something has finished.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        const [g, u] = await Promise.all([guideOf(ctx.userId, { id: ctx.workspaceId, kind: "WORKSPACE" }), usageOf(ctx.workspaceId)]);
+        return {
+          steps: g.steps.map((s) => ({ step: s.title, done: s.done, ...(s.by ? { doneBy: s.by } : {}), ...(s.busy ? { underWay: true } : {}) })),
+          next: g.next?.title ?? "Everything in getting started is done.",
+          qlooQueries: `${u.used} of ${u.allowance} used this month`,
+          onScreenNow: here === null ? "unknown" : here || "overview",
+        };
+      },
+    }),
+    about: tool({
+      description: "Read the card for one page of the product: what it's for, its parts (by name), how to use it, and what people get wrong. Use it when the person asks how something works or where to find it.",
+      inputSchema: z.object({ page: z.enum(PAGES) }),
+      execute: async ({ page }) => CARDS[page],
+    }),
+    go_to: tool({
+      description: "Open a page for the person (their browser navigates). Use when they ask to see or go somewhere. Only pages with a path.",
+      inputSchema: z.object({ page: z.enum(PAGES) }),
+      execute: async ({ page }) => {
+        const card = CARDS[page]!;
+        if (card.path === null) return { opened: false, note: `${card.title} has no single address; tell the person how to reach it instead.` };
+        return { opened: true, path: card.path };
+      },
+    }),
+    point_at: tool({
+      description: "Ring one part of a page and show a short line beside it, opening its page first if needed. Use this to show where something is instead of describing menus. One part per call; keep `say` to one plain sentence.",
+      inputSchema: z.object({ part: z.enum(PART_IDS), say: z.string().min(4).max(180) }),
+      execute: async ({ part }) => {
+        const [page, card] = cardOfPart(part)!;
+        if (onScreen.has(part)) return { pointed: true };
+        if (card.path !== null && here !== card.path) return { pointed: true, note: `Opening ${card.title} first.` };
+        return { pointed: false, note: `That part isn't on the person's screen right now${page === "ad-read" ? " (it's on an ad's own page)" : " (the page may still be loading or have no data yet)"}. Say where it will be instead.` };
+      },
+    }),
+    walk_through: tool({
+      description: "Start a short step-by-step walk-through of a page in the person's browser: map (reading the Culture Map), plays, ad (checking an ad), ad-read (reading an ad check). Best for 'how do I use this' questions.",
+      inputSchema: z.object({ journey: z.enum(JOURNEY_IDS) }),
+      execute: async ({ journey }) => ({ started: journey !== "ad-read" || here?.startsWith("ad-check/") === true, ...(journey === "ad-read" && !here?.startsWith("ad-check/") ? { note: "Only works on an ad's own page; ask them to open one first." } : {}) }),
+    }),
+  };
+}
+
+export function askTools(workspaceId: string, guide?: { userId: string; screen: Screen | null }) {
+  return {
+    ...(guide ? guideTools({ userId: guide.userId, workspaceId, screen: guide.screen }) : {}),
     read_map: tool({
       description:
         "Read this workspace's Culture Map: per category (podcasts, films, TV, places, creators, artists, brands, books) what its customers like, in order, and whether each item is only theirs, shared with a rival, or only a rival's. Call it before answering anything about the brand's customers or rivals.",

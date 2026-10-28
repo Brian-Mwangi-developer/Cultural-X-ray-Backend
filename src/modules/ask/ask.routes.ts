@@ -24,6 +24,8 @@ const sendSchema = z.object({
     role: z.literal("user"),
     parts: z.array(z.object({ type: z.literal("text"), text: z.string().trim().min(1, "Type a question first.").max(4000, "That's a long question. Try a shorter one.") })).min(1).max(4),
   }),
+  // What the person has on screen as they ask (the guide's live screen): page and tagged parts.
+  screen: z.object({ page: z.string().max(160), parts: z.array(z.string().max(48)).max(40) }).optional(),
 });
 
 /** Plain words for what went wrong with the model, never the provider's raw error. */
@@ -92,9 +94,9 @@ askRouter.post("/orgs/:id/ask", requireAuth, async (req, res, next) => {
 
     const result = streamText({
       model: chosen.model,
-      instructions: instructionsFor({ brand: org.name, market: org.markets[0] === "US" ? "US" : "UK", rivals: (intent.rivals ?? []).map((r) => r.name), seeds: (intent.seeds ?? []).map((s) => s.name) }),
+      instructions: instructionsFor({ brand: org.name, market: org.markets[0] === "US" ? "US" : "UK", rivals: (intent.rivals ?? []).map((r) => r.name), seeds: (intent.seeds ?? []).map((s) => s.name), screen: input.screen ?? null }),
       messages: await convertToModelMessages(history),
-      tools: askTools(organization.id),
+      tools: askTools(organization.id, { userId: user.id, screen: input.screen ?? null }),
       stopWhen: stepCountIs(5),
       maxOutputTokens: config.ask.maxTokens,
       abortSignal: abort.signal,
