@@ -618,3 +618,15 @@ Steps a person still has to take, ticked by what is true, never by clicking (pla
 | `guide.cards.ts` | What Ask X-Ray knows about the product: one index line per page (in every prompt) and a card per page (parts, how, what people get wrong), read with the `about` tool. Parts match the web's `data-guide` names; `tests/guide-cards.test.ts` fails if they drift. |
 
 Ask X-Ray's guide tools (`ask.tools.ts`, `guideTools`): `status` (steps, next, queries left), `about(page)`, and the hands `go_to`, `point_at`, `walk_through`. The browser sends what's on screen with each question (`screen`: page and tagged parts); each hand is checked against it and returns whether it can be done, then the web carries it out once. None of them changes anything.
+
+Memory (`guide.memory.ts`, table `guide_memory`): short notes per person per workspace, written by Ask X-Ray's `remember` tool, at most 30 (the oldest go), the 10 newest in each prompt with the welcome goal. `GET /orgs/:id/guide/memory`, `DELETE /orgs/:id/guide/memory/:id|all`, `PUT /me/guide/memory {on}` (off is the person-level mark `memory:off`; it stops new notes, existing ones stay until forgotten).
+
+## 21. Talk to X-Ray (`src/modules/voice`)
+
+| File | Does |
+|---|---|
+| `voice.routes.ts` | `POST /orgs/:id/voice/ticket`: a brand's own members only; checks Vertex is set up and today's minutes; returns a one-use, one-minute ticket and the socket URL (`VOICE_PUBLIC_URL`). |
+| `voice.relay.ts` | `attachVoice(server)` takes WebSocket upgrades on `/api/v1/voice` (origin checked, ticket redeemed from Redis). Each call opens Gemini Live (`VOICE_MODEL`, `VOICE_LOCATION`, the bound key, server-side only) with Ask's instructions plus voice rules, and Ask's tools minus the pictures. Browser → relay: `audio` (16 kHz PCM, base64), `screen`, `text`, `pause`, `stop`. Relay → browser: `ready`, `audio` (24 kHz), `you`/`say` captions, `interrupted`, `turn`, `tool`, `do` (a hand to carry out), `remembered`, `end {reason}`. On end: seconds added to `voice:day:<user>:<date>`, an `ai_call` row (stage `voice`), and the words saved as an Ask thread. |
+
+Gemini cost per person: `GET /orgs/:id/usage/ai` (`aiSpendOf` in `usage.service.ts`) sums this month's `ai_call` rows for Vertex by person and by activity (ad checks, writing plays, talking to X-Ray with its minutes). A brand counts calls in its workspace, whoever made them; an agency counts calls its own people made in any client. Owners and admins get everyone; other members get only their own line. Shown in Settings › Usage under "Gemini cost by person". Claude (Ask X-Ray in text) isn't in `ai_call` yet; its tokens are only on each answer.
+

@@ -51,3 +51,44 @@ export async function usageOf(organizationId: string, now = new Date()) {
       .sort((a, b) => b.calls - a.calls),
   };
 }
+
+/** Plain names for what a Gemini call was for. Voice is its own stage; the rest follow the feature. */
+const FEATURE_WORDS: Record<string, string> = { AD_CHECK: "Ad checks", PLAYS: "Writing plays", BRIEF: "Briefs", MAP_BUILD: "Culture Maps", LOOKUP: "Brand and place search" };
+const AI_ACTIVITY = (stage: string, feature: string) => (stage === "voice" ? "Talking to X-Ray" : (FEATURE_WORDS[feature] ?? "Other"));
+
+/**
+ * This month's Gemini cost (ad checks, plays, talking to X-Ray), by person and by activity, from `ai_call` (each call's tokens priced when
+ * it was made, usage/pricing.ts). A brand counts calls made in its workspace, whoever made them (its
+ * agency's people included); an agency counts calls its own people made, in any client.
+ */
+export async function aiSpendOf(org: { id: string; kind: OrgKind }, now = new Date()) {
+  const since = monthStart(now);
+  const people = org.kind === "AGENCY" ? (await prisma.member.findMany({ where: { organizationId: org.id }, select: { userId: true } })).map((m) => m.userId) : null;
+  const where = { provider: "vertex", createdAt: { gte: since }, ...(people ? { userId: { in: people } } : { workspaceId: org.id }) };
+  const [byUser, byStage] = await Promise.all([
+    prisma.aiCall.groupBy({ by: ["userId"], where, _sum: { costMicros: true }, _count: { _all: true } }),
+    prisma.aiCall.groupBy({ by: ["stage", "feature"], where, _sum: { costMicros: true, durationMs: true } }),
+  ]);
+  const users = new Map(
+    (await prisma.user.findMany({ where: { id: { in: byUser.map((u) => u.userId).filter((x): x is string => Boolean(x)) } }, select: { id: true, name: true, email: true } })).map((u) => [u.id, u]),
+  );
+  const activity = new Map<string, { costMicros: number; seconds: number }>();
+  for (const s of byStage) {
+    const name = AI_ACTIVITY(s.stage, s.feature);
+    const a = activity.get(name) ?? { costMicros: 0, seconds: 0 };
+    a.costMicros += s._sum.costMicros ?? 0;
+    if (s.stage === "voice") a.seconds += Math.round((s._sum.durationMs ?? 0) / 1000);
+    activity.set(name, a);
+  }
+  return {
+    since: since.toISOString(),
+    totalMicros: byUser.reduce((n, u) => n + (u._sum.costMicros ?? 0), 0),
+    byPerson: byUser
+      .map((u) => {
+        const who = u.userId ? users.get(u.userId) : undefined;
+        return { userId: u.userId, name: who?.name ?? "Someone no longer here", email: who?.email ?? null, calls: u._count._all, costMicros: u._sum.costMicros ?? 0 };
+      })
+      .sort((a, b) => b.costMicros - a.costMicros),
+    byActivity: [...activity].map(([name, a]) => ({ name, costMicros: a.costMicros, ...(a.seconds ? { seconds: a.seconds } : {}) })).sort((a, b) => b.costMicros - a.costMicros),
+  };
+}
