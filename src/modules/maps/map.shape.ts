@@ -36,6 +36,43 @@ export function insightsParams(category: Category, signalIds: string[], market: 
   return category.kind === "DESTINATION" ? { ...base, "filter.geocode.country_code": market } : { ...base, "signal.location.query": COUNTRY[market] };
 }
 
+/* ---------------------------------------------------------------- filters */
+
+/**
+ * The Culture Map's filters. Each filtered view is the same comparison with one more signal, built
+ * the first time someone asks for it and stored beside the base map (territory rows carry the
+ * segment and tier). Probe of 28 October on Jude's UK map: age bands change the lists for real
+ * (over-55s: RedHanded, Gretchen Rubin, Home Cooking), two bands combine in one call, and Qloo's
+ * popularity sits near 1 for almost everything, so "niche" is popularity under 0.8 (16 podcasts;
+ * under 0.5 returned none).
+ */
+export const AGES = [
+  { key: "", label: "Everyone", value: null },
+  { key: "age:under_25", label: "Under 25", value: "24_and_younger" },
+  { key: "age:25_34", label: "25–34", value: "25_to_29,30_to_34" },
+  { key: "age:35_44", label: "35–44", value: "35_to_44" },
+  { key: "age:45_54", label: "45–54", value: "45_to_54" },
+  { key: "age:55_plus", label: "55 and over", value: "55_and_older" },
+] as const;
+export type AgeKey = (typeof AGES)[number]["key"];
+export type Tier = "MAINSTREAM" | "NICHE";
+export const NICHE_POPULARITY_MAX = 0.8;
+export type Variant = { segment: AgeKey; tier: Tier };
+export const BASE: Variant = { segment: "", tier: "MAINSTREAM" };
+export const isBase = (v: Variant) => v.segment === "" && v.tier === "MAINSTREAM";
+/**
+ * The base map's rows only. Filtered views live in the same tables (their own segment and tier), so
+ * every query that means "the map" filters on this; without it they double-count (an overview listed
+ * a podcast twice once an age view existed).
+ */
+export const BASE_ROWS = { segment: "", tier: "MAINSTREAM" } as const;
+
+/** The extra parameters a filtered view adds to each insights call. */
+export function variantParams(v: Variant): Record<string, string | number> {
+  const age = AGES.find((a) => a.key === v.segment)?.value;
+  return { ...(age ? { "signal.demographics.age": age } : {}), ...(v.tier === "NICHE" ? { "filter.popularity.max": NICHE_POPULARITY_MAX } : {}) };
+}
+
 export type Entity = { id: string; name: string; popularity: number | null; affinity: number; image: string | null; detail: string | null; location: { lat: number; lon: number } | null };
 
 type Raw = {

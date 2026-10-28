@@ -1,4 +1,5 @@
 import { prisma } from "@/infra/database";
+import { BASE_ROWS } from "@/modules/maps/map.shape";
 import { TTL } from "@/modules/lookup/cache";
 import { qloo, qlooEnabled } from "@/modules/lookup/qloo.client";
 import { bestMatch, type QlooRecord } from "@/modules/lookup/qloo.shape";
@@ -106,7 +107,7 @@ export async function placeReferences(refs: { name: string; kind: string }[], co
       const body = await limited(() => qloo<{ results?: QlooRecord[] }>("/search", { query: name, types: REFERENCE_TYPES[kind]!, take: 5 }, TTL.brandSearch, TIMEOUT));
       const results = body.results ?? [];
       const ids = results.map((r) => r.entity_id);
-      const onMap = ids.length ? await prisma.territoryItem.findMany({ where: { mapId: comparison.mapId, entityId: { in: ids } }, select: { entityId: true, label: true, rivalSubjectId: true } }) : [];
+      const onMap = ids.length ? await prisma.territoryItem.findMany({ where: { mapId: comparison.mapId, ...BASE_ROWS, entityId: { in: ids } }, select: { entityId: true, label: true, rivalSubjectId: true } }) : [];
       const sides = new Set(brandIds(comparison.side));
       const match = results.find((r) => sides.has(r.entity_id) || onMap.some((i) => i.entityId === r.entity_id)) ?? bestMatch(results, name);
       if (!match) return { name, territory: null, rival: null };

@@ -5,13 +5,15 @@ import { config } from "@/config/env";
 import { prisma } from "@/infra/database";
 import { redis } from "@/infra/redis";
 import { errorDetails, logger } from "@/observability/logger";
-import { QUEUES } from "@/messaging/topology";
+import { publish } from "@/messaging/publisher";
+import { EXCHANGES, QUEUES } from "@/messaging/topology";
 import { type Handler, type HandlerMap, Outcome, PermanentError } from "@/messaging/types";
 import { enqueueEmail, isUndeliverable } from "@/modules/email/email.queue";
 import { cacheKey, TTL } from "@/modules/lookup/cache";
 import { qloo } from "@/modules/lookup/qloo.client";
-import { audienceParams, type Category, CATEGORIES, type Entity, entitiesOf, insightsParams, type Market, readingFor, scoresIn, SEGMENTS, splitTerritory, warningsOf } from "@/modules/maps/map.shape";
+import { AGES, audienceParams, BASE_ROWS, type Category, CATEGORIES, categoryOf, type Entity, entitiesOf, insightsParams, type Market, readingFor, scoresIn, SEGMENTS, splitTerritory, type Variant, variantParams, warningsOf } from "@/modules/maps/map.shape";
 import { enqueuePlays } from "@/modules/plays/plays.queue";
+import { withMeter } from "@/modules/usage/meter";
 
 /**
  * Building a Culture Map in the worker. The web only reads progress, so leaving the page,
@@ -45,8 +47,8 @@ async function limited<T>(work: () => Promise<T>): Promise<T> {
 type Side = { subjectId: string; name: string; ids: string[] };
 type Answer = { side: Side; entities: Entity[]; evidence: { id: string; params: Record<string, string | number>; key: string; ms: number; warnings: unknown[] | null } };
 
-async function ask(category: Category, side: Side, market: Market, exclude: Set<string>): Promise<Answer> {
-  const params = insightsParams(category, side.ids, market);
+async function ask(category: Category, side: Side, market: Market, exclude: Set<string>, extra: Record<string, string | number> = {}): Promise<Answer> {
+  const params = { ...insightsParams(category, side.ids, market), ...extra };
   const started = Date.now();
   const body = await limited(() => qloo(INSIGHTS, params, TTL.insights, { timeoutMs: 60_000, tries: 3 }));
   return {
@@ -228,7 +230,7 @@ async function planFor(mapId: string) {
 
 /** Ready: mark it once, then tell the person who started it. */
 async function finish(mapId: string, workspaceId: string, workspace: { name: string; slug: string }, createdById: string | null) {
-  const mine = await prisma.territoryItem.count({ where: { mapId, label: { in: ["YOURS", "CONTESTED"] } } });
+  const mine = await prisma.territoryItem.count({ where: { mapId, ...BASE_ROWS, label: { in: ["YOURS", "CONTESTED"] } } });
   const flipped = await prisma.cultureMap.updateMany({ where: { id: mapId, status: { not: "READY" } }, data: { status: "READY", builtAt: new Date(), thinData: mine < 20 } });
   if (!flipped.count) return;
   // Plays are written from the finished map; a failure to queue them never fails the build.
@@ -263,7 +265,8 @@ const buildMap: Handler<typeof jobSchema> = {
 
       const todo = CATEGORIES.filter((c) => !done.has(c.kind));
       const steps = [...todo.map((c) => ({ name: c.kind as string, run: () => buildCategory(plan, c) })), ...(audienceDone ? [] : [{ name: "AUDIENCE", run: () => buildAudience(plan) }])];
-      const results = await Promise.allSettled(steps.map((step) => step.run()));
+      const meter = { workspaceId: map.workspaceId, userId: map.createdById, kind: "MAP_BUILD" as const, mapId };
+      const results = await withMeter(meter, () => Promise.allSettled(steps.map((step) => step.run())));
       const failed = results.flatMap((r, i) => (r.status === "rejected" ? [{ category: steps[i]?.name, error: r.reason as unknown }] : []));
       const first = failed[0];
       if (first) {
@@ -283,4 +286,79 @@ const buildMap: Handler<typeof jobSchema> = {
   },
 };
 
-export const mapHandlers: HandlerMap = { [MAP_BUILD]: buildMap as Handler };
+/* ------------------------------------------------------------- filtered views */
+
+export const MAP_VARIANT = "map.variant";
+const VARIANT_SECONDS = 5 * 60;
+const VARIANT_DONE_SECONDS = 30 * 86_400;
+export const variantKey = (mapId: string, kind: string, v: Variant) => `map:variant:${mapId}:${kind}:${v.segment || "all"}:${v.tier}`;
+
+/**
+ * One category of a ready map, filtered (an age band, or niche only). The same comparison as the
+ * build, with the filter's signal added, saved beside the base rows. No reading, globe or progress:
+ * those belong to the base map. A filter with nothing in it is remembered, so it isn't asked again.
+ */
+async function buildVariant(plan: Plan, category: Category, v: Variant) {
+  const extra = variantParams(v);
+  const [mine, theirs] = await Promise.all([ask(category, plan.you, plan.market, plan.exclude, extra), Promise.all(plan.rivals.map((side) => ask(category, side, plan.market, plan.exclude, extra)))]);
+  const split = splitTerritory(mine.entities, new Map(theirs.map((a) => [a.side.subjectId, a.entities])));
+  const answers = [mine, ...theirs];
+  const entities = new Map(answers.flatMap((a) => a.entities.map((e) => [e.id, e] as const)));
+  const keys = new Set((await prisma.qlooCache.findMany({ where: { key: { in: answers.map((a) => a.evidence.key) } }, select: { key: true } })).map((r) => r.key));
+  const evidenceOf = new Map(answers.map((a) => [a.side.subjectId, a.evidence.id]));
+  await prisma.$transaction([
+    prisma.qlooEntity.createMany({
+      data: [...entities.values()].map((e) => ({ id: e.id, kind: category.kind, name: e.name, popularity: e.popularity, imageUrl: e.image, properties: e.detail ? { detail: e.detail } : undefined })),
+      skipDuplicates: true,
+    }),
+    prisma.evidence.createMany({
+      data: answers.map((a) => ({
+        id: a.evidence.id, path: INSIGHTS, params: a.evidence.params, cacheKey: keys.has(a.evidence.key) ? a.evidence.key : null,
+        status: a.evidence.warnings ? "WARNING" : "OK", warnings: (a.evidence.warnings as Prisma.InputJsonArray | null) ?? undefined, durationMs: a.evidence.ms,
+      })),
+    }),
+    prisma.association.createMany({
+      data: answers.flatMap((a) => a.entities.map((e, rank) => ({ mapId: plan.mapId, subjectId: a.side.subjectId, entityId: e.id, category: category.kind, segment: v.segment, tier: v.tier, rank, affinity: e.affinity, evidenceId: a.evidence.id }))),
+      skipDuplicates: true,
+    }),
+    prisma.territoryItem.createMany({
+      data: split.map((x) => ({
+        mapId: plan.mapId, entityId: x.entity.id, category: category.kind, segment: v.segment, tier: v.tier, label: x.label, leanSelf: x.lean, rivalSubjectId: x.rival,
+        evidenceId: evidenceOf.get(x.label === "THEIRS" ? x.rival! : plan.you.subjectId) ?? null,
+      })),
+      skipDuplicates: true,
+    }),
+  ]);
+  return split.length;
+}
+
+const variantJob = z.object({ mapId: z.string().min(1), kind: z.string(), segment: z.enum(AGES.map((a) => a.key) as [string, ...string[]]), tier: z.enum(["MAINSTREAM", "NICHE"]), userId: z.string().nullish() });
+
+const buildMapVariant: Handler<typeof variantJob> = {
+  schema: variantJob,
+  async handle({ mapId, kind, segment, tier, userId }) {
+    const v = { segment, tier } as Variant;
+    const category = categoryOf(kind);
+    try {
+      const found = await planFor(mapId);
+      if (!found || found.map.status !== "READY" || !category) return Outcome.Skipped;
+      const have = await prisma.territoryItem.count({ where: { mapId, category: category.kind, segment: v.segment, tier: v.tier } });
+      if (have) return Outcome.Skipped;
+      const meter = { workspaceId: found.map.workspaceId, userId: userId ?? null, kind: "MAP_BUILD" as const, mapId };
+      const n = await withMeter(meter, () => buildVariant(found.plan, category, v));
+      if (redis.status === "ready") await redis.set(`${variantKey(mapId, kind, v)}:done`, String(n), "EX", VARIANT_DONE_SECONDS).catch(() => undefined);
+      logger.info({ mapId, kind, segment, tier, items: n }, "map view built");
+      return Outcome.Processed;
+    } finally {
+      if (redis.status === "ready") await redis.del(variantKey(mapId, kind, v)).catch(() => undefined);
+    }
+  },
+};
+
+/** Queue a filtered view of one category; the page shows it as building until it lands. */
+export async function enqueueVariant(mapId: string, workspaceId: string, kind: string, v: Variant, userId: string) {
+  if (redis.status === "ready") await redis.set(variantKey(mapId, kind, v), "1", "EX", VARIANT_SECONDS).catch(() => undefined);
+  return publish(EXCHANGES.jobs.name, MAP_VARIANT, { mapId, kind, segment: v.segment, tier: v.tier, userId }, { organizationId: workspaceId });
+}
+
+export const mapHandlers: HandlerMap = { [MAP_BUILD]: buildMap as Handler, [MAP_VARIANT]: buildMapVariant as Handler };

@@ -7,7 +7,7 @@ import { findTikTok, findYouTube, latestVideos, type Video } from "@/modules/cre
 import { generate } from "@/modules/gemini/gemini.client";
 import { qloo } from "@/modules/lookup/qloo.client";
 import { TTL } from "@/modules/lookup/cache";
-import { type Label } from "@/modules/maps/map.shape";
+import { BASE_ROWS, type Label } from "@/modules/maps/map.shape";
 import { proofOf } from "@/modules/plays/plays";
 import type { Attribution } from "@/modules/usage/ai-calls";
 
@@ -91,12 +91,13 @@ async function peopleOnMap(workspaceId: string) {
   const you = (map.subjects.find((s) => s.role === "SELF") ?? map.subjects.find((s) => s.role === "SEED"))?.id ?? "";
   const names = new Map(map.subjects.map((s) => [s.id, s.entity.name]));
   const rivals = map.subjects.filter((s) => s.role === "RIVAL").map((s) => s.entity.name);
+  const through = map.subjects.some((s) => s.role === "SELF") ? null : map.subjects.filter((s) => s.role === "SEED").map((s) => s.entity.name);
   const [items, ranks] = await Promise.all([
     prisma.territoryItem.findMany({
-      where: { mapId: map.id, category: "PERSON", label: { in: ["YOURS", "CONTESTED"] } },
+      where: { mapId: map.id, ...BASE_ROWS, category: "PERSON", label: { in: ["YOURS", "CONTESTED"] } },
       select: { label: true, leanSelf: true, rivalSubjectId: true, entity: { select: { id: true, name: true, imageUrl: true, properties: true, creator: true } } },
     }),
-    prisma.association.findMany({ where: { mapId: map.id, subjectId: you, category: "PERSON" }, select: { entityId: true, rank: true } }),
+    prisma.association.findMany({ where: { mapId: map.id, ...BASE_ROWS, subjectId: you, category: "PERSON" }, select: { entityId: true, rank: true } }),
   ]);
   const rank = new Map(ranks.map((r) => [r.entityId, r.rank]));
   const people = items
@@ -112,12 +113,12 @@ async function peopleOnMap(workspaceId: string) {
       profile: i.entity.creator,
     }))
     .sort((a, b) => (a.label === b.label ? 0 : a.label === "YOURS" ? -1 : 1) || a.rank - b.rank);
-  return { mapId: map.id, rivals, people };
+  return { mapId: map.id, rivals, through, people };
 }
 
 type Person = NonNullable<Awaited<ReturnType<typeof peopleOnMap>>>["people"][number];
 
-function card(p: Person, rivals: string[], videos: Video[]) {
+function card(p: Person, rivals: string[], videos: Video[], through: string[] | null) {
   const pr = p.profile;
   return {
     entityId: p.entityId,
@@ -126,7 +127,7 @@ function card(p: Person, rivals: string[], videos: Video[]) {
     description: pr?.description ?? p.detail,
     label: p.label,
     rival: p.rival,
-    proof: proofOf({ ref: "", entityId: p.entityId, name: p.name, kind: "PERSON", label: p.label, rival: p.rival, lean: p.lean, rank: p.rank, detail: null }, rivals),
+    proof: proofOf({ ref: "", entityId: p.entityId, name: p.name, kind: "PERSON", label: p.label, rival: p.rival, lean: p.lean, rank: p.rank, detail: null }, rivals, through),
     checked: Boolean(pr),
     youtube: pr?.youtubeChannel ? { channelId: pr.youtubeChannel, handle: pr.youtubeHandle, title: pr.youtubeTitle, subscribers: pr.subscribers, match: pr.youtubeMatch } : null,
     tiktok: pr?.tiktokHandle ? { handle: pr.tiktokHandle, name: pr.tiktokName, match: pr.tiktokMatch } : null,
@@ -150,14 +151,14 @@ export async function creatorsFor(workspaceId: string, playId?: string) {
   }
   const shown = order.slice(0, 12);
   const videos = await Promise.all(shown.map((p) => videosOf(p.profile?.youtubeChannel ?? null).then((v) => v.slice(0, 3))));
-  return { creators: shown.map((p, i) => card(p, found.rivals, videos[i]!)), checking: shown.some((p) => !p.profile) };
+  return { creators: shown.map((p, i) => card(p, found.rivals, videos[i]!, found.through)), checking: shown.some((p) => !p.profile) };
 }
 
 export async function creatorDetail(workspaceId: string, entityId: string) {
   const found = await peopleOnMap(workspaceId);
   const p = found?.people.find((x) => x.entityId === entityId);
   if (!found || !p) throw new HttpError(404, "We couldn't find that creator on your map.");
-  return { creator: card(p, found.rivals, await videosOf(p.profile?.youtubeChannel ?? null)) };
+  return { creator: card(p, found.rivals, await videosOf(p.profile?.youtubeChannel ?? null), found.through) };
 }
 
 /* ------------------------------------------------------------- outreach */

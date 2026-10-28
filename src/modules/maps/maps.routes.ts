@@ -4,6 +4,7 @@ import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
 import { audienceOf, latestMap, startBuild } from "@/modules/maps/map.service";
+import { parseView, requestView, territoryView } from "@/modules/maps/map.view";
 
 export const mapsRouter = Router();
 
@@ -41,6 +42,31 @@ mapsRouter.get("/orgs/:id/maps/latest/audience", requireAuth, async (req, res, n
     const { user } = sessionOf(req);
     const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
     res.set("Cache-Control", "no-store").json({ audience: await audienceOf(organization.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** One category of the map under the chosen filters (age, mainstream or niche). Any member or connected agency reads it. */
+mapsRouter.get("/orgs/:id/maps/latest/territory", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    res.set("Cache-Control", "no-store").json(await territoryView(organization.id, parseView(req.query)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Build a filtered view (202). Anyone who can read the map can ask for one: it is a way of reading
+ * it, and it costs about one Qloo query per brand compared, counted on the account's meter.
+ */
+mapsRouter.post("/orgs/:id/maps/latest/territory", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    res.status(202).json(await requestView(organization.id, user.id, parseView({ ...req.query, ...(req.body ?? {}) })));
   } catch (error) {
     next(error);
   }

@@ -4,7 +4,7 @@ import { HttpError } from "@/http/errors";
 import { publish } from "@/messaging/publisher";
 import { EXCHANGES } from "@/messaging/topology";
 import { MAP_BUILD } from "@/modules/maps/map.build";
-import { CATEGORIES, SEGMENTS } from "@/modules/maps/map.shape";
+import { BASE_ROWS, CATEGORIES, SEGMENTS } from "@/modules/maps/map.shape";
 
 type Pick = { id?: string; name: string; kind: "brand" | "place" | "new" };
 type Intent = { brand?: Pick; rivals?: Pick[]; seeds?: Pick[] };
@@ -80,6 +80,8 @@ type Item = { id: string; name: string; image: string | null; detail: string | n
  * map on most questions, and each uncached read is several slow round trips to the database.
  */
 const VIEW_TTL = 86_400;
+const listOf = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+
 async function cachedView<T>(key: string, build: () => Promise<T>): Promise<T> {
   if (redis.status === "ready") {
     const hit = await redis.get(key).catch(() => null);
@@ -108,12 +110,12 @@ async function mapView(mapId: string, perCategory: number) {
   });
   if (!map) return null;
   const items = await prisma.territoryItem.findMany({
-    where: { mapId: map.id },
+    where: { mapId: map.id, ...BASE_ROWS },
     select: { category: true, label: true, leanSelf: true, rivalSubjectId: true, entity: { select: { id: true, name: true, imageUrl: true, properties: true } } },
   });
   const rank = new Map<string, number>();
   // Rank within the side that holds the item, so "yours" keeps Qloo's order.
-  const assocs = await prisma.association.findMany({ where: { mapId: map.id }, select: { subjectId: true, entityId: true, category: true, rank: true } });
+  const assocs = await prisma.association.findMany({ where: { mapId: map.id, ...BASE_ROWS }, select: { subjectId: true, entityId: true, category: true, rank: true } });
   for (const a of assocs) rank.set(`${a.subjectId}:${a.category}:${a.entityId}`, a.rank);
   const you = (map.subjects.find((s) => s.role === "SELF") ?? map.subjects.find((s) => s.role === "SEED"))?.id ?? "";
   const rivalName = new Map(map.subjects.map((s) => [s.id, s.entity.name]));
@@ -222,7 +224,7 @@ async function audienceView(mapId: string) {
     queryCount: map.queryCount,
     hasAudience: map.audienceIndexes.length > 0,
     sides: [
-      { key: "you", name: self ? self.entity.name : seeds.map((s) => s.entity.name).join(" and "), readThrough: !self },
+      { key: "you", name: self ? self.entity.name : listOf(seeds.map((s) => s.entity.name)), readThrough: !self },
       ...rivals.map((r) => ({ key: r.id, name: r.entity.name, readThrough: false })),
     ],
     segments: SEGMENTS.map((s) => ({ key: s.key, label: s.label, cells: { you: yoursOf(s.key), ...Object.fromEntries(rivals.map((r) => [r.id, cellOf(r.id, s.key)])) } as Record<string, Cell> })),

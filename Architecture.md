@@ -423,6 +423,29 @@ Cost: 8 × (1 + rivals) + 8 calls, so 32 for two rivals. Measured: 44 s cold, ab
 
 ---
 
+### 14.5 The Culture Map page and its filters (`map.view.ts`)
+
+`GET /orgs/:id/maps/latest/territory?category=&age=&tier=` returns one category of the latest ready map as yours / shared / theirs. Each item comes with:
+- where it ranks on each side;
+- its reach in words (niche when Qloo's popularity is under 0.8);
+- the Qloo calls behind it, from its evidence rows.
+
+The page says all of this in words; Qloo's raw affinity never reaches the screen. `workspaceAccess` applies, so connected agencies read their clients' maps.
+
+**Filters** are the same comparison with one more signal:
+- age bands via `signal.demographics.age` (two bands combine in one call, so "25–34" is `25_to_29,30_to_34`);
+- niche via `filter.popularity.max=0.8`.
+
+A filtered view is built the first time someone asks for it. `POST …/territory` (202) publishes `map.variant` on the map-build queue. The view then costs one call per brand compared (about 3), counted on the meter (§19), and is stored beside the base rows (`segment` and `tier` on `association` and `territory_item`), so asking again is free.
+
+Redis holds `map:variant:<map>:<kind>:<age>:<tier>` while it builds, and `…:done` for 30 days, so a filter Qloo returns nothing for isn't asked again.
+
+**Probe of 28 October** (Jude's UK map):
+- Age bands change the lists for real: for over-55s, RedHanded, Gretchen Rubin and Home Cooking lead.
+- With the niche cap, Qloo's podcast pool is so small that every brand gets the same list (16 of 16 shared). Artists stay distinct (4 of 20 shared).
+
+A view where at least 80% is shared and nothing is only yours comes back with `sameForEveryone`. The page then says Qloo can't tell customers apart under that filter, rather than reading into it.
+
 ## 15. Ask X-Ray (`src/modules/ask`)
 
 The assistant inside the product. It answers from the workspace's own Culture Map, in plain words, and can draw a ranking, a chart or a table in the conversation.
@@ -555,3 +578,30 @@ Profiles live in `creator_profile` and are rechecked after 30 days. Content is s
 | `POST /orgs/:id/creators/:entityId/outreach` `{ playId? }` | A first message (fast model, about 0.1¢) to copy and send yourself. Writers only. It names one of their videos, never other creators, never anyone's looks. |
 
 Costs are attributed to the person and workspace as `PLAYS` in `ai_call`.
+
+## 19. Qloo usage per account (`src/modules/usage/meter.ts`, `usage.service.ts`)
+
+Every Qloo call goes through `qloo()`. The client reports each one to the meter:
+- a call that reached Qloo counts once, failed or not, because Qloo counts it;
+- an answer from our cache is noted as a free hit.
+
+Work that calls Qloo runs inside `withMeter({ workspaceId, kind, userId, mapId })`, an `AsyncLocalStorage` context:
+
+| Work | Kind |
+|---|---|
+| Map builds and filtered views | `MAP_BUILD` |
+| Ad checks (placing cues) | `AD_CHECK` |
+| The plays job's creator lookups | `PLAYS` |
+| Lookups (brand and place search), under the session's active organisation | `LOOKUP` |
+
+Calls outside any account (the first steps of onboarding, before there is one) are not counted.
+
+**Ledger.** Each call is a `usage_ledger` row: the workspace it was for, the payer (the workspace's `subscription.payerId`, else itself), who started it, and the endpoint. Changing who pays, or a plan's allowance, is a subscription change; the ledger doesn't move.
+
+**`GET /orgs/:id/usage`** (members of that account) returns:
+- this calendar month's calls and cache hits for the payer's pool;
+- the allowance (the payer's `subscription.monthlyQueryAllowance`, else 1,000 for a brand and 10,000 for an agency);
+- the reset date;
+- a breakdown by kind and by workspace.
+
+The sidebar meter and Settings › Usage read it. The meter reads again on every navigation, and when a filtered map view finishes (`xray:usage` event). Going over the allowance is shown, not blocked: nothing stops mid-build. Counting started on 28 October 2026; nothing before that was backfilled.

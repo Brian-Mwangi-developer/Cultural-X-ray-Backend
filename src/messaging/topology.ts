@@ -25,7 +25,7 @@ export const QUEUES = {
   mapBuild: {
     name: "xray.map.build",
     exchange: EXCHANGES.jobs.name,
-    bindings: ["map.build", "plays.write"],
+    bindings: ["map.build", "plays.write", "map.variant"],
     prefetch: 2,
     maxAttempts: 3,
     retryDelayMs: 30_000,

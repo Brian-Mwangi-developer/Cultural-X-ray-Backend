@@ -8,7 +8,8 @@ import { type Handler, type HandlerMap, Outcome } from "@/messaging/types";
 import { errorDetails, logger } from "@/observability/logger";
 import { enrichPeople } from "@/modules/creators/creators.service";
 import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
-import { type Kind, type Label, type Market } from "@/modules/maps/map.shape";
+import { BASE_ROWS, type Kind, type Label, type Market } from "@/modules/maps/map.shape";
+import { withMeter } from "@/modules/usage/meter";
 import { keepBacked, type PlayContext, type PlayItem, playsPrompt, playsSchema, practicePlays } from "@/modules/plays/plays";
 
 /** Writes a workspace's plays from its latest ready map, then finds the channels of the people they name. */
@@ -38,8 +39,8 @@ export async function contextFor(mapId: string): Promise<PlayContext | null> {
   const you = (map.subjects.find((s) => s.role === "SELF") ?? map.subjects.find((s) => s.role === "SEED"))?.id ?? "";
   const names = new Map(map.subjects.map((s) => [s.id, s.entity.name]));
   const [items, ranks] = await Promise.all([
-    prisma.territoryItem.findMany({ where: { mapId }, select: { category: true, label: true, leanSelf: true, rivalSubjectId: true, entity: { select: { id: true, name: true, properties: true } } } }),
-    prisma.association.findMany({ where: { mapId, subjectId: you }, select: { entityId: true, category: true, rank: true } }),
+    prisma.territoryItem.findMany({ where: { mapId, ...BASE_ROWS }, select: { category: true, label: true, leanSelf: true, rivalSubjectId: true, entity: { select: { id: true, name: true, properties: true } } } }),
+    prisma.association.findMany({ where: { mapId, ...BASE_ROWS, subjectId: you }, select: { entityId: true, category: true, rank: true } }),
   ]);
   const rank = new Map(ranks.map((r) => [`${r.category}:${r.entityId}`, r.rank]));
   const order = { YOURS: 0, CONTESTED: 0, THEIRS: 1 } as const;
@@ -66,6 +67,7 @@ export async function contextFor(mapId: string): Promise<PlayContext | null> {
   }
   return {
     brand: map.workspace.name,
+    through: map.subjects.some((s) => s.role === "SELF") ? null : map.subjects.filter((s) => s.role === "SEED").map((s) => s.entity.name),
     market: map.market as Market,
     rivals: map.subjects.filter((s) => s.role === "RIVAL").map((s) => s.entity.name),
     readings: map.readings.filter((r) => r.category).map((r) => ({ kind: r.category as Kind, text: r.text })),
@@ -109,8 +111,10 @@ const writePlaysJob: Handler<typeof jobSchema> = {
       logger.info({ mapId, plays: rows.length }, "plays written");
       // The people the creator plays name get their channels looked up now, so the page has them ready.
       const people = [...new Set(rows.filter((r) => r.kind === "CREATOR").flatMap((r) => r.items.map((i) => i.entityId)))];
-      const others = await prisma.territoryItem.findMany({ where: { mapId, category: "PERSON", label: { in: ["YOURS", "CONTESTED"] } }, select: { entityId: true }, take: 12 });
-      await enrichPeople([...new Set([...people, ...others.map((o) => o.entityId)])].slice(0, 16)).catch((error) => logger.warn({ mapId, ...errorDetails(error) }, "plays: creator profiles not checked"));
+      const others = await prisma.territoryItem.findMany({ where: { mapId, ...BASE_ROWS, category: "PERSON", label: { in: ["YOURS", "CONTESTED"] } }, select: { entityId: true }, take: 12 });
+      const owner = await prisma.cultureMap.findUnique({ where: { id: mapId }, select: { workspaceId: true } });
+      const meter = owner ? { workspaceId: owner.workspaceId, kind: "PLAYS" as const, userId: userId ?? null, mapId } : null;
+      await withMeter(meter, () => enrichPeople([...new Set([...people, ...others.map((o) => o.entityId)])].slice(0, 16))).catch((error) => logger.warn({ mapId, ...errorDetails(error) }, "plays: creator profiles not checked"));
       return Outcome.Processed;
     } catch (error) {
       if (error instanceof PolicyRefusal || error instanceof GeminiRequestError || error instanceof GeminiUnavailable) {
