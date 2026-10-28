@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Fit } from "@/modules/adcheck/adcheck.fit";
 import { type AdContext, PEOPLE_RULE, type ShotDescription } from "@/modules/adcheck/adcheck.shape";
 
 /**
@@ -105,6 +106,8 @@ export type Verdict = {
   references: { name: string; says: string }[];
   reshoot: string[];
   notes: string[];
+  /** Does the ad show what the business sells (adcheck.fit.ts)? Absent on checks made before it. */
+  fit?: Fit;
 };
 
 export function list(words: string[]) {

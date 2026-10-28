@@ -11,6 +11,7 @@ import { type AdAudio, type AdContext, audioSchema, contextSchema, elementsFrom,
 import { comparisonFor, placeCues, placeReferences } from "@/modules/adcheck/adcheck.place";
 import { cuesPrompt, cuesSchema, noMapVerdict, type PlacedCue, practiceCues, shotTerritory, uniqueCues, type Verdict, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
 import { prepare } from "@/modules/adcheck/adcheck.video";
+import { checkFit } from "@/modules/adcheck/adcheck.fit";
 import { fromShotNumbers, KINDS as RECUT_KINDS, practiceRecuts, readOfRecut, type RecutContext, recutPrompt, recutsSchema, type ShotContext, toEditList } from "@/modules/adcheck/recut";
 import { download } from "@/modules/adcheck/storage";
 import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
@@ -130,9 +131,17 @@ async function read(adId: string, attempt: number) {
 
   await setStage(adId, "placing on your map");
   const verdict = await withMeter({ workspaceId: ad.workspaceId, kind: "AD_CHECK", userId: who.userId ?? null }, () => placeOnMap(adId, ad.workspaceId, ad.rivals, context.json, audio.json, shots, described, who));
+  // Before re-cutting: does the ad show what the business sells? Cutting can't add a missing product.
+  await setStage(adId, "checking what it sells");
+  const fit = await checkFit(adId, who).catch((error) => {
+    logger.warn({ adId, ...errorDetails(error) }, "ad check: fit not checked");
+    return null;
+  });
   // The re-cuts are a bonus on top of the read: if writing them fails, the check is still ready.
-  await setStage(adId, "writing re-cuts");
-  await writeRecuts(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "ad check: re-cuts not written"));
+  if (fit?.fits !== "no") {
+    await setStage(adId, "writing re-cuts");
+    await writeRecuts(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "ad check: re-cuts not written"));
+  }
   await prisma.ad.update({ where: { id: adId }, data: { status: "READY", stage: "ready", readAt: new Date(), failureReason: null } });
   logger.info({ adId, shots: shots.length, described: described.size, elements: rows.length, lean: verdict.lean, attempt }, "ad read");
   return Outcome.Processed;
@@ -198,6 +207,11 @@ export async function writeRecuts(adId: string, who: Attribution) {
   if (!ad || !check || !ad.durationMs || !ad.shots.length) return 0;
   const verdict = check.verdict as unknown as Verdict;
   if (verdict.headline.startsWith("Build your Culture Map")) return 0; // nothing to steer toward without a map
+  // The wrong product can't be cut into the right one: no re-cuts, and none left from before.
+  if (verdict.fit?.fits === "no") {
+    await prisma.recut.deleteMany({ where: { adCheckId: check.id, kind: { in: [...RECUT_KINDS] } } });
+    return 0;
+  }
 
   const shots: ShotContext[] = ad.shots.map((sh) => ({
     index: sh.index,
@@ -242,7 +256,11 @@ const writeRecutsJob: Handler<typeof recutJob> = {
     const ad = await prisma.ad.findUnique({ where: { id: adId }, select: { workspaceId: true, status: true } });
     if (!ad || ad.status !== "READY") return Outcome.Skipped;
     try {
-      const n = await writeRecuts(adId, { feature: "AD_CHECK", userId: userId ?? null, workspaceId: ad.workspaceId, adId });
+      const who = { feature: "AD_CHECK" as const, userId: userId ?? null, workspaceId: ad.workspaceId, adId };
+      // Ads checked before the fit check existed get it now.
+      const latest = await prisma.adCheck.findFirst({ where: { adId }, orderBy: { createdAt: "desc" }, select: { verdict: true } });
+      if (latest && !(latest.verdict as { fit?: unknown } | null)?.fit) await checkFit(adId, who).catch((error) => logger.warn({ adId, ...errorDetails(error) }, "re-cuts: fit not checked"));
+      const n = await writeRecuts(adId, who);
       logger.info({ adId, recuts: n }, "re-cuts written");
       return Outcome.Processed;
     } catch (error) {
