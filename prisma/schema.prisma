@@ -374,6 +374,8 @@ model Organization {
   joinDomain        String?
   joinRole          String?
   connectCode       String?
+  /// The read-only culture report link (`/r/<token>`); null when sharing is off.
+  reportShareToken  String?
   brandEntityId     String?
   brandEntity       QlooEntity?      @relation(fields: [brandEntityId], references: [id], onDelete: SetNull)
   custodianId       String?
@@ -403,6 +405,7 @@ model Organization {
 
   @@unique([slug])
   @@unique([connectCode])
+  @@unique([reportShareToken])
   @@index([kind])
   @@index([custodianId])
   @@map("organization")

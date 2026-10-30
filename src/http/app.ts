@@ -23,6 +23,7 @@ import { guideRouter } from "@/modules/guide/guide.routes";
 import { voiceRouter } from "@/modules/voice/voice.routes";
 import { briefsRouter } from "@/modules/briefs/brief.routes";
 import { mediaRouter } from "@/modules/media/media.routes";
+import { reportRouter } from "@/modules/report/report.routes";
 
 export function createApp(): Express {
   const app = express();
@@ -44,7 +45,7 @@ export function createApp(): Express {
   app.all("/api/auth/*splat", toNodeHandler(auth));
 
   app.use(express.json({ limit: "1mb" }));
-  app.use("/api/v1", createApiRateLimit(), meRouter, orgsRouter, connectionsRouter, lookupRouter, mapsRouter, playsRouter, usageRouter, askRouter, adCheckRouter, guideRouter, voiceRouter, briefsRouter, mediaRouter);
+  app.use("/api/v1", createApiRateLimit(), meRouter, orgsRouter, connectionsRouter, lookupRouter, mapsRouter, playsRouter, usageRouter, askRouter, adCheckRouter, guideRouter, voiceRouter, briefsRouter, mediaRouter, reportRouter);
   app.use("/api/v1/ops", opsRouter);
 
   app.use(notFound);
