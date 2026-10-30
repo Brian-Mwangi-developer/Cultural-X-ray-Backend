@@ -1,0 +1,130 @@
+name: xray
+
+# Production on one 4 GB EC2 host: Redis, RabbitMQ, the API, the worker, and Caddy for HTTPS.
+# No Prometheus or Grafana here, to stay inside the memory budget. Only Caddy publishes ports.
+# The deploy workflow copies this file, Caddyfile and rabbitmq/ to /opt/xray and writes /opt/xray/.env.
+#   IMAGE      the backend image, tagged by commit (set by the workflow)
+#   API_HOST   the public hostname Caddy gets a certificate for, e.g. 13-48-0-1.sslip.io
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-app-env: &app-env
+  NODE_ENV: production
+  TRUST_PROXY_HOPS: "2"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  VOICE_PUBLIC_URL: wss://${API_HOST:?set API_HOST}
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: xray-redis
+    restart: unless-stopped
+    command: >
+      sh -c 'exec redis-server
+      --requirepass "$$REDIS_PASSWORD"
+      --appendonly yes --appendfsync everysec
+      --maxmemory 256mb --maxmemory-policy noeviction'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?missing from .env}
+    volumes: [redis_data:/data]
+    networks: [xray]
+    logging: *logging
+    mem_limit: 320m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    container_name: xray-rabbitmq
+    hostname: xray-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:?missing from .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?missing from .env}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-xray}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-xray.conf:ro
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    networks: [xray]
+    logging: *logging
+    mem_limit: 640m
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  api:
+    image: ${IMAGE:?set IMAGE}
+    container_name: xray-api
+    restart: unless-stopped
+    command: ["node", "dist/server.js"]
+    env_file: [.env]
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    image: ${IMAGE:?set IMAGE}
+    container_name: xray-worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file: [.env]
+    environment: *app-env
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    # ffmpeg runs here when an ad is checked.
+    mem_limit: 1200m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: xray-caddy
+    restart: unless-stopped
+    environment:
+      API_HOST: ${API_HOST:?set API_HOST}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [xray]
+    logging: *logging
+    mem_limit: 128m
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  xray:
+    name: xray

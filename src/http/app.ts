@@ -28,7 +28,7 @@ import { reportRouter } from "@/modules/report/report.routes";
 export function createApp(): Express {
   const app = express();
   app.disable("x-powered-by");
-  app.set("trust proxy", 1);
+  app.set("trust proxy", config.http.trustProxyHops);
 
   app.use(requestId);
   app.use(httpMetrics);

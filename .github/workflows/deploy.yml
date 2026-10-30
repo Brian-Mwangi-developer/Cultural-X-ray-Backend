@@ -1,0 +1,86 @@
+name: Deploy
+
+# Every push to main: typecheck, build the image, apply migrations, then roll the EC2 host.
+# Secrets: EC2_HOST (Elastic IP), EC2_SSH_KEY (private key for ubuntu@), PROD_ENV (the whole
+# server .env), DATABASE_URL (for migrations). Variable: API_HOST (e.g. 13-48-0-1.sslip.io).
+# Tests aren't run here: they need Redis, RabbitMQ and the database (run `pnpm test` locally).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/brian-mwangi-developer/cultural-x-ray-backend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm prisma generate && pnpm check
+        env:
+          DATABASE_URL: postgresql://build@localhost/build
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: devops/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }},${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Apply migrations
+        run: pnpm db:deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Roll the server
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          PROD_ENV: ${{ secrets.PROD_ENV }}
+          API_HOST: ${{ vars.API_HOST }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          install -m 600 /dev/null ~/.ssh_key && printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh_key
+          SSH="ssh -i $HOME/.ssh_key -o StrictHostKeyChecking=accept-new ubuntu@$EC2_HOST"
+
+          $SSH 'sudo mkdir -p /opt/xray/rabbitmq && sudo chown -R ubuntu: /opt/xray'
+          scp -i ~/.ssh_key -o StrictHostKeyChecking=accept-new \
+            devops/docker-compose.prod.yml devops/Caddyfile ubuntu@$EC2_HOST:/opt/xray/
+          scp -i ~/.ssh_key devops/rabbitmq/rabbitmq.conf devops/rabbitmq/enabled_plugins ubuntu@$EC2_HOST:/opt/xray/rabbitmq/
+          printf '%s\n' "$PROD_ENV" | $SSH 'umask 077 && cat > /opt/xray/.env'
+
+          printf '%s' "$GHCR_TOKEN" | $SSH "docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+          $SSH "cd /opt/xray && export IMAGE=$IMAGE:${{ github.sha }} API_HOST=$API_HOST \
+            && docker compose -f docker-compose.prod.yml pull \
+            && docker compose -f docker-compose.prod.yml up -d --remove-orphans --wait --wait-timeout 240 \
+            && docker compose -f docker-compose.prod.yml ps \
+            && docker logout ghcr.io && docker image prune -af --filter until=72h"
+
+      - name: Check it answers over HTTPS
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "https://${{ vars.API_HOST }}/health"

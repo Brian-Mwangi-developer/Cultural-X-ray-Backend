@@ -1,0 +1,16 @@
+# HTTPS for the API, with a Let's Encrypt certificate for API_HOST.
+# Vercel proxies /api/auth and /api/v1 here; the browser opens the voice WebSocket here directly.
+{
+	servers {
+		# Vercel has no fixed addresses. Keep its X-Forwarded-For so the API (TRUST_PROXY_HOPS=2)
+		# sees the visitor's address rather than Vercel's.
+		trusted_proxies static 0.0.0.0/0 ::/0
+	}
+}
+
+{$API_HOST} {
+	encode gzip
+	# Prometheus isn't deployed; keep metrics off the internet even with the token check.
+	respond /metrics 404
+	reverse_proxy api:4000
+}
