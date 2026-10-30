@@ -113,3 +113,39 @@ describe("re-cuts: asking Gemini", () => {
     for (const r of answer.recuts) for (const c of r.changes) expect(SHOTS.some((s) => s.index === c.shot)).toBe(true);
   });
 });
+
+describe("re-cut: a version someone tweaked (R6) and its read (R7)", () => {
+  const shots = [
+    { index: 0, startMs: 0, endMs: 4000 },
+    { index: 1, startMs: 4000, endMs: 9000 },
+    { index: 2, startMs: 9000, endMs: 12000 },
+  ];
+  const base = { title: "Mine", format: "9:16" as const, sound: "original" as const, endCard: null };
+
+  it("keeps clips inside their real shots, marks reordering, and times captions and the end card on the new timeline", async () => {
+    const { editFromTweak } = await import("@/modules/adcheck/recut");
+    const edit = editFromTweak({ ...base, endCard: "Fresh every morning", clips: [{ shot: 2, inMs: 8000, outMs: 12500, caption: { text: "Baked at six", position: "top" } }, { shot: 0, inMs: 500, outMs: 3500 }] }, shots, "GAIL's");
+    if ("problem" in edit) throw new Error(edit.problem);
+    expect(edit.clips.map((c) => [c.shot, c.inMs, c.outMs, c.moved])).toEqual([[2, 9000, 12000, false], [0, 500, 3500, true]]);
+    expect(edit.durationMs).toBe(6000);
+    expect(edit.overlays).toEqual([
+      { kind: "caption", text: "Baked at six", atMs: 0, untilMs: 3000, position: "top" },
+      { kind: "endCard", brand: "GAIL's", line: "Fresh every morning", atMs: 3000, untilMs: 6000 },
+    ]);
+  });
+
+  it("refuses shots that don't exist or are cut too short, in words", async () => {
+    const { editFromTweak } = await import("@/modules/adcheck/recut");
+    expect(editFromTweak({ ...base, clips: [{ shot: 7, inMs: 0, outMs: 1000 }] }, shots, "x")).toEqual({ problem: "One of those shots isn't in the draft." });
+    expect(editFromTweak({ ...base, clips: [{ shot: 1, inMs: 4000, outMs: 4200 }] }, shots, "x")).toMatchObject({ problem: expect.stringContaining("Shot 2 is too short") });
+  });
+
+  it("counts new caption words with the shot they sit over", async () => {
+    const { readOfRecut } = await import("@/modules/adcheck/recut");
+    const ctx = shots.map((s, i) => ({ ...s, description: null, territory: null, cues: i === 2 ? [{ cue: "pool party", territory: "THEIRS" as const, rival: "Pret" }] : [] }));
+    const words = new Map([["Baked at six", { cue: "Baked at six", tag: null, judged: { territory: "YOURS" as const, rival: null, gap: 0.2 } }]]);
+    const read = readOfRecut({ clips: [{ shot: 2, inMs: 9000, outMs: 12000, moved: false, caption: { text: "Baked at six", position: "top" } }] }, ctx, words);
+    expect(read.yours.map((y) => [y.cue, y.shots])).toEqual([["baked at six", [2]]]);
+    expect(read.theirs.map((t) => t.cue)).toEqual(["pool party"]);
+  });
+});

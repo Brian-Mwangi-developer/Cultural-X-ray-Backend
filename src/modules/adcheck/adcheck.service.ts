@@ -6,6 +6,11 @@ import { enqueueAdCheck, enqueueRecut } from "@/modules/adcheck/adcheck.queue";
 import { craftFindings, type Placement } from "@/modules/adcheck/adcheck.craft";
 import type { Fit } from "@/modules/adcheck/adcheck.fit";
 import { describe, remove, storageReady, uploadedPath, uploadToken, VIDEO_TYPES, videoPath } from "@/modules/adcheck/storage";
+import type { Prisma } from "@/generated/prisma/client";
+import { comparisonFor, placeCues, qlooEnabled } from "@/modules/adcheck/adcheck.place";
+import { shotSchema } from "@/modules/adcheck/adcheck.shape";
+import type { PlacedCue } from "@/modules/adcheck/adcheck.verdict";
+import { editFromTweak, readOfRecut, toShotContexts, type Tweak, wordsOf } from "@/modules/adcheck/recut";
 
 /** Ad checks for one workspace: create and upload, start reading, read back, delete. */
 
@@ -90,7 +95,13 @@ export async function adDetail(workspaceId: string, adId: string) {
       checks: {
         orderBy: { createdAt: "desc" },
         take: 1,
-        select: { id: true, mapId: true, verdict: true, createdAt: true, recuts: { where: { kind: { in: ["RECOMMENDED", "SHORTEST", "BOLDEST"] } }, orderBy: { kind: "asc" }, select: { id: true, kind: true, editList: true, verdict: true, createdAt: true } } },
+        select: {
+          id: true,
+          mapId: true,
+          verdict: true,
+          createdAt: true,
+          recuts: { where: { kind: { in: ["RECOMMENDED", "SHORTEST", "BOLDEST"] } }, orderBy: { kind: "asc" }, select: { id: true, kind: true, editList: true, verdict: true, createdAt: true } },
+        },
       },
     },
   });
@@ -211,4 +222,58 @@ export function startVideoSweep(everyMs = 3_600_000) {
 export function stopVideoSweep() {
   if (sweepTimer) clearInterval(sweepTimer);
   sweepTimer = null;
+}
+
+/** The versions someone tweaked and checked again (R6–R7), newest first. */
+export async function versionsOf(workspaceId: string, adId: string) {
+  return prisma.recut.findMany({
+    where: { kind: "CUSTOM", adCheck: { ad: { id: adId, workspaceId } } },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { id: true, kind: true, editList: true, verdict: true, parentId: true, createdAt: true, createdBy: { select: { name: true } } },
+  });
+}
+
+/**
+ * Save a tweaked version and check it again (R6 → R7). Reordering, trimming and dropping need no model:
+ * each kept shot's cues were placed when the draft was read. Only new words (captions, the end card)
+ * are placed on the map, with a few Qloo look-ups. Returns the version with its read.
+ */
+export async function saveVersion(workspaceId: string, adId: string, userId: string, tweak: Tweak & { from?: string | null }) {
+  const ad = await prisma.ad.findFirst({
+    where: { id: adId, workspaceId },
+    select: {
+      status: true,
+      rivals: true,
+      workspace: { select: { name: true } },
+      shots: { orderBy: { index: "asc" }, select: { index: true, startMs: true, endMs: true, description: true, territory: true, evidence: true } },
+      checks: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true } },
+    },
+  });
+  if (!ad) throw new HttpError(404, "We couldn't find that ad check.");
+  const check = ad.checks[0];
+  if (ad.status !== "READY" || !check || !ad.shots.length) throw new HttpError(409, "The ad has to be read before it can be tweaked.", { code: "ADCHECK_NOT_READY" });
+
+  const shots = toShotContexts(ad.shots, (d) => shotSchema.safeParse(d).data ?? null);
+  const edit = editFromTweak(tweak, shots, ad.workspace.name);
+  if ("problem" in edit) throw new HttpError(400, edit.problem, { code: "ADCHECK_BAD_VERSION" });
+
+  let words = new Map<string, PlacedCue>();
+  const said = wordsOf(edit);
+  if (said.length && qlooEnabled()) {
+    const extra = ((ad.rivals as { entityIds?: string[] } | null)?.entityIds ?? []).filter((x) => typeof x === "string");
+    const comparison = await comparisonFor(workspaceId, extra).catch(() => null);
+    if (comparison) {
+      words = await placeCues(said, comparison.side, { feature: "AD_CHECK", userId, workspaceId, adId }).catch((error) => {
+        logger.warn({ adId, ...errorDetails(error) }, "ad check: new words not placed");
+        return new Map<string, PlacedCue>();
+      });
+    }
+  }
+  const verdict = readOfRecut(edit, shots, words);
+  const parent = tweak.from ? await prisma.recut.findFirst({ where: { id: tweak.from, adCheckId: check.id }, select: { id: true } }) : null;
+  return prisma.recut.create({
+    data: { adCheckId: check.id, kind: "CUSTOM", editList: edit as unknown as Prisma.InputJsonObject, verdict: verdict as unknown as Prisma.InputJsonObject, parentId: parent?.id ?? null, createdById: userId },
+    select: { id: true, kind: true, editList: true, verdict: true, parentId: true, createdAt: true },
+  });
 }

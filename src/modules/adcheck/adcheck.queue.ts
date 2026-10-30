@@ -12,7 +12,7 @@ import { comparisonFor, placeCues, placeReferences } from "@/modules/adcheck/adc
 import { cuesPrompt, cuesSchema, noMapVerdict, type PlacedCue, practiceCues, shotTerritory, uniqueCues, type Verdict, verdictFrom } from "@/modules/adcheck/adcheck.verdict";
 import { prepare } from "@/modules/adcheck/adcheck.video";
 import { checkFit } from "@/modules/adcheck/adcheck.fit";
-import { fromShotNumbers, KINDS as RECUT_KINDS, practiceRecuts, readOfRecut, type RecutContext, recutPrompt, recutsSchema, type ShotContext, toEditList } from "@/modules/adcheck/recut";
+import { fromShotNumbers, KINDS as RECUT_KINDS, practiceRecuts, readOfRecut, type RecutContext, recutPrompt, recutsSchema, type ShotContext, toEditList, toShotContexts } from "@/modules/adcheck/recut";
 import { download } from "@/modules/adcheck/storage";
 import { GeminiRequestError, GeminiUnavailable, generate, PolicyRefusal } from "@/modules/gemini/gemini.client";
 import type { Attribution } from "@/modules/usage/ai-calls";
@@ -213,14 +213,7 @@ export async function writeRecuts(adId: string, who: Attribution) {
     return 0;
   }
 
-  const shots: ShotContext[] = ad.shots.map((sh) => ({
-    index: sh.index,
-    startMs: sh.startMs,
-    endMs: sh.endMs,
-    description: sh.description ? shotSchema.parse(sh.description) : null,
-    territory: sh.territory,
-    cues: ((sh.evidence as { cues?: { cue: string; territory: ShotContext["territory"]; rival: string | null; tag?: { name: string; type: string } | null }[] } | null)?.cues ?? []).map((q) => ({ cue: q.cue, territory: q.territory, rival: q.rival, tag: q.tag ? { name: q.tag.name, type: q.tag.type } : null })),
-  }));
+  const shots: ShotContext[] = toShotContexts(ad.shots, (d) => shotSchema.parse(d));
   const detail = (e: { detail: unknown }) => (e.detail ?? {}) as Record<string, unknown>;
   const music = ad.elements.find((e) => e.kind === "SOUND" && detail(e).music === true);
   const context: RecutContext = {

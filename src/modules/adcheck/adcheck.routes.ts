@@ -7,7 +7,8 @@ import { requireAuth, sessionOf } from "@/modules/auth/require-auth";
 import { basisOf } from "@/modules/maps/map.basis";
 import { requireRole, workspaceAccess } from "@/modules/orgs/access";
 import { audit } from "@/modules/orgs/audit";
-import { adDetail, createAd, deleteAd, deleteVideo, listAds, PLACEMENTS, requestRecuts, startAd, videoOf } from "@/modules/adcheck/adcheck.service";
+import { adDetail, createAd, deleteAd, deleteVideo, listAds, PLACEMENTS, requestRecuts, saveVersion, startAd, versionsOf, videoOf } from "@/modules/adcheck/adcheck.service";
+import { tweakSchema } from "@/modules/adcheck/recut";
 import { stream } from "@/modules/adcheck/storage";
 
 export const adCheckRouter = Router();
@@ -92,6 +93,30 @@ adCheckRouter.post("/orgs/:id/ads/:adId/recuts", requireAuth, async (req, res, n
     requireRole(member.role, WRITERS, "re-cut ads");
     await requestRecuts(organization.id, String(req.params.adId), user.id);
     res.status(202).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Versions someone tweaked and checked again (R6–R7). */
+adCheckRouter.get("/orgs/:id/ads/:adId/versions", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    res.set("Cache-Control", "no-store").json({ versions: await versionsOf(organization.id, String(req.params.adId)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Save a tweaked version and check it again: returns it with where it now lands. */
+adCheckRouter.post("/orgs/:id/ads/:adId/versions", requireAuth, async (req, res, next) => {
+  try {
+    const { user } = sessionOf(req);
+    const { organization, member } = await workspaceAccess(user.id, { id: String(req.params.id) });
+    requireRole(member.role, WRITERS, "tweak ads");
+    const input = tweakSchema.extend({ from: z.string().max(40).nullish() }).parse(req.body);
+    res.status(201).json({ version: await saveVersion(organization.id, String(req.params.adId), user.id, input) });
   } catch (error) {
     next(error);
   }

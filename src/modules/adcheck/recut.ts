@@ -143,8 +143,11 @@ export function fromShotNumbers(answer: z.infer<typeof recutsSchema>) {
 
 /* ----------------------------------------------------------- edit list */
 
-export type Clip = { shot: number; inMs: number; outMs: number; moved: boolean };
-export type Overlay = { kind: "caption"; text: string; atMs: number; untilMs: number } | { kind: "endCard"; brand: string; line: string; atMs: number; untilMs: number };
+export type Position = "top" | "middle" | "bottom";
+export type Format = "9:16" | "16:9" | "1:1";
+/** A clip of the draft. `cropX`/`cropY` (0–1) say where the frame sits when cropped to another shape; `caption` is a tweak's own line over it. */
+export type Clip = { shot: number; inMs: number; outMs: number; moved: boolean; cropX?: number; cropY?: number; caption?: { text: string; position: Position } };
+export type Overlay = { kind: "caption"; text: string; atMs: number; untilMs: number; position?: Position } | { kind: "endCard"; brand: string; line: string; atMs: number; untilMs: number };
 /** What a change rests on, for the evidence tooltip: the cue, the Qloo tag it matched, where it leans. */
 export type Proof = { cue: string; tag: { name: string; type: string } | null; territory: Label; rival: string | null; shot: number };
 export type EditChange = Change & { id: string; on: boolean; proof: Proof | null };
@@ -158,6 +161,10 @@ export type EditList = {
   clips: Clip[];
   overlays: Overlay[];
   durationMs: number;
+  /** A tweaked version (R6) records its shape and sound; suggested re-cuts leave them out. */
+  format?: Format;
+  sound?: "original" | "mute";
+  endCard?: string | null;
 };
 
 /**
@@ -271,21 +278,98 @@ export function toEditList(p: RecutProposal, shots: ShotContext[], brand: string
   return { version: 1, kind: p.kind, title: p.title, summary: p.summary, newFootage: p.newFootage, changes, clips, overlays, durationMs };
 }
 
+/* ------------------------------------------------- a tweaked version (R6) */
+
+export const MAX_CLIPS = 30;
+export const tweakSchema = z.object({
+  title: z.string().trim().min(1).max(60).default("Your version"),
+  format: z.enum(["9:16", "16:9", "1:1"]).default("9:16"),
+  sound: z.enum(["original", "mute"]).default("original"),
+  endCard: z.string().trim().max(80).nullable().default(null),
+  clips: z
+    .array(
+      z.object({
+        shot: z.number().int().min(0),
+        inMs: z.number().int().min(0),
+        outMs: z.number().int().min(1),
+        cropX: z.number().min(0).max(1).optional(),
+        cropY: z.number().min(0).max(1).optional(),
+        caption: z.object({ text: z.string().trim().min(1).max(80), position: z.enum(["top", "middle", "bottom"]) }).optional(),
+      }),
+    )
+    .min(1, "Keep at least one shot.")
+    .max(MAX_CLIPS),
+});
+export type Tweak = z.infer<typeof tweakSchema>;
+
+/**
+ * A version the person edited, as an edit list the players and export read. Every clip must sit inside
+ * a real shot of the draft and last at least MIN_CLIP_MS; anything else is refused, never guessed at.
+ * A caption lasts its whole clip; the end card is the last 3 seconds.
+ */
+export function editFromTweak(t: Tweak, shots: Pick<ShotContext, "index" | "startMs" | "endMs">[], brand: string): EditList | { problem: string } {
+  const byIndex = new Map(shots.map((s) => [s.index, s]));
+  const clips: Clip[] = [];
+  for (const c of t.clips) {
+    const shot = byIndex.get(c.shot);
+    if (!shot) return { problem: "One of those shots isn't in the draft." };
+    const inMs = Math.max(shot.startMs, c.inMs);
+    const outMs = Math.min(shot.endMs, c.outMs);
+    if (outMs - inMs < MIN_CLIP_MS) return { problem: `Shot ${c.shot + 1} is too short to keep: make it at least ${MIN_CLIP_MS / 1000} s or remove it.` };
+    clips.push({ shot: c.shot, inMs, outMs, moved: false, ...(c.cropX !== undefined ? { cropX: c.cropX } : {}), ...(c.cropY !== undefined ? { cropY: c.cropY } : {}), ...(c.caption ? { caption: c.caption } : {}) });
+  }
+  // "moved" marks clips out of the draft's order, for the shot strip.
+  let last = -1;
+  for (const k of clips) {
+    if (k.shot < last) k.moved = true;
+    last = Math.max(last, k.shot);
+  }
+  const overlays: Overlay[] = [];
+  let at = 0;
+  for (const k of clips) {
+    const len = k.outMs - k.inMs;
+    if (k.caption) overlays.push({ kind: "caption", text: k.caption.text, atMs: at, untilMs: at + len, position: k.caption.position });
+    at += len;
+  }
+  if (t.endCard) overlays.push({ kind: "endCard", brand, line: t.endCard, atMs: Math.max(0, at - 3_000), untilMs: at });
+  return { version: 1, kind: "RECOMMENDED", title: t.title, summary: "", newFootage: "", changes: [], clips, overlays, durationMs: at, format: t.format, sound: t.sound, endCard: t.endCard };
+}
+
+/** New words a version adds (its captions and end card), to place on the map. */
+export function wordsOf(edit: Pick<EditList, "clips" | "endCard">) {
+  return [...new Set([...edit.clips.flatMap((c) => (c.caption ? [c.caption.text] : [])), ...(edit.endCard ? [edit.endCard] : [])].map((w) => w.trim()).filter(Boolean))];
+}
+
 /* ---------------------------------------------------------- the read */
 
 /**
  * Where a re-cut lands, from the same Qloo evidence as the draft: only the cues of the shots it keeps.
  * New captions aren't placed yet (that's "Check again", R7).
  */
-export function readOfRecut(edit: Pick<EditList, "clips">, shots: ShotContext[]): Verdict {
+export function readOfRecut(edit: Pick<EditList, "clips">, shots: ShotContext[], words: Map<string, PlacedCue> = new Map()): Verdict {
   const kept = new Set(edit.clips.map((c) => c.shot));
   const placed = new Map<string, PlacedCue>();
   const shotCues: { index: number; cues: string[] }[] = [];
   for (const sh of shots.filter((s) => kept.has(s.index))) {
-    shotCues.push({ index: sh.index, cues: sh.cues.map((q) => q.cue) });
+    // A caption over a shot counts with that shot's own cues ("Check again", R7).
+    const said = edit.clips.filter((c) => c.shot === sh.index && c.caption).map((c) => c.caption!.text.trim());
+    shotCues.push({ index: sh.index, cues: [...sh.cues.map((q) => q.cue), ...said.map((w) => w.toLowerCase())] });
     for (const q of sh.cues) {
       if (!placed.has(q.cue)) placed.set(q.cue, { cue: q.cue, tag: null, judged: q.territory ? { territory: q.territory, rival: q.rival, gap: 0.1 } : null });
     }
   }
+  for (const [w, p] of words) if (!placed.has(w.toLowerCase())) placed.set(w.toLowerCase(), { ...p, cue: w.toLowerCase() });
   return verdictFrom(placed, shotCues);
+}
+
+/** The draft's shots as the re-cut writer and the checker read them, from saved rows. */
+export function toShotContexts(rows: { index: number; startMs: number; endMs: number; description: unknown; territory: Label; evidence: unknown }[], parse: (d: unknown) => ShotDescription | null): ShotContext[] {
+  return rows.map((sh) => ({
+    index: sh.index,
+    startMs: sh.startMs,
+    endMs: sh.endMs,
+    description: sh.description ? parse(sh.description) : null,
+    territory: sh.territory,
+    cues: ((sh.evidence as { cues?: { cue: string; territory: Label; rival: string | null; tag?: { name: string; type: string } | null }[] } | null)?.cues ?? []).map((q) => ({ cue: q.cue, territory: q.territory, rival: q.rival, tag: q.tag ? { name: q.tag.name, type: q.tag.type } : null })),
+  }));
 }
