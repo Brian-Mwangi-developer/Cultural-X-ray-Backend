@@ -76,7 +76,7 @@ export function craftFindings(f: CraftFacts): Finding[] {
       out.push({
         id: `shape-${label}`,
         level: "fix",
-        title: `${names(ps.map((p) => PLACEMENT_NAME[p]))} want${ps.length === 1 ? "s" : ""} ${label}; this ad is ${SHAPE_WORDS[shape]}`,
+        title: `${names(ps.map((p) => PLACEMENT_NAME[p]))} want${ps.length === 1 && !/s$/.test(PLACEMENT_NAME[ps[0]!]) ? "s" : ""} ${label}; this ad is ${SHAPE_WORDS[shape]}`,
         why: vertical
           ? `A ${SHAPE_WORDS[shape]} ad on a full-screen vertical feed plays small between bars or gets cropped at the sides, so the product and any words near the edges can be lost, and it reads as an ad made for somewhere else.`
           : `It will be letterboxed or cropped to fit, which shrinks the product and can cut words at the edges.`,
