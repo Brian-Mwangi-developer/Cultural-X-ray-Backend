@@ -22,6 +22,13 @@ console.log(`map ${map.id}: ${map.status}`);
 let last = "";
 for (;;) {
   const m = (await latestMap(org.id))!;
+  // During a rebuild the last ready map comes back with the new build's progress alongside.
+  if ("rebuild" in m) {
+    console.log(`${Math.round((Date.now() - started) / 1000)}s rebuilding: ${m.rebuild.status} ${m.rebuild.categoriesDone}/${m.rebuild.categoriesTotal}`);
+    if (m.rebuild.status === "FAILED") break;
+    await new Promise((r) => setTimeout(r, 2000));
+    continue;
+  }
   const line = `${Math.round((Date.now() - started) / 1000)}s ${m.status} ${m.categoriesDone}/${m.categoriesTotal} · ${m.queryCount} queries`;
   if (line.replace(/^\d+s /, "") !== last) console.log(line);
   last = line.replace(/^\d+s /, "");

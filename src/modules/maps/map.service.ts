@@ -94,9 +94,14 @@ async function cachedView<T>(key: string, build: () => Promise<T>): Promise<T> {
 
 /** The workspace's latest map as the overview and build screens show it, or null. */
 export async function latestMap(workspaceId: string, perCategory = 8) {
-  const head = await prisma.cultureMap.findFirst({ where: { workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true, status: true } });
+  const head = await prisma.cultureMap.findFirst({ where: { workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true, status: true, categoriesDone: true, categoriesTotal: true } });
   if (!head) return null;
-  return head.status === "READY" ? cachedView(`map:view:${head.id}:${perCategory}`, () => mapView(head.id, perCategory)) : mapView(head.id, perCategory);
+  if (head.status === "READY") return cachedView(`map:view:${head.id}:${perCategory}`, () => mapView(head.id, perCategory));
+  // A rebuild (new rivals or read-through brands) keeps the last ready map on show, with its progress alongside.
+  const ready = await prisma.cultureMap.findFirst({ where: { workspaceId, status: "READY" }, orderBy: { createdAt: "desc" }, select: { id: true } });
+  if (!ready) return mapView(head.id, perCategory);
+  const map = await cachedView(`map:view:${ready.id}:${perCategory}`, () => mapView(ready.id, perCategory));
+  return map && { ...map, rebuild: { id: head.id, status: head.status, categoriesDone: head.categoriesDone, categoriesTotal: head.categoriesTotal } };
 }
 
 async function mapView(mapId: string, perCategory: number) {
