@@ -807,6 +807,9 @@ model Brief {
   segment     String?
   cities      String[]
   market      Market
+  /// What it's for, in the person's words ("Summer launch"), and where it will run.
+  occasion    String?
+  placements  String[]
   status      BriefStatus   @default(DRAFT)
   authorId    String?
   author      User?         @relation(fields: [authorId], references: [id], onDelete: SetNull)
@@ -834,6 +837,8 @@ model BriefItem {
   playId     String?
   play       Play?      @relation(fields: [playId], references: [id], onDelete: SetNull)
   state      ClaimState @default(UNCITED)
+  /// The map items a line rests on: entityId, name, label, rival, and the words for its tooltip.
+  refs       Json?
   criticNote String?
   createdAt  DateTime   @default(now())
   updatedAt  DateTime   @updatedAt
