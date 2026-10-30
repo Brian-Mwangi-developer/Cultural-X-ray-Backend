@@ -13,6 +13,8 @@ const schema = z.object({
   WORKER_METRICS_PORT: z.coerce.number().int().positive().default(4001),
   PUBLIC_WEB_URL: z.url().default("http://localhost:3000"),
   WEB_ORIGINS: csv.default(["http://localhost:3000"]),
+  // Proxies in front of the API: 1 locally (Next), 2 in production (Vercel, then Caddy).
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
 
   DATABASE_URL: z.string().min(1),
 
@@ -78,6 +80,8 @@ const schema = z.object({
   // The browser connects with a one-use ticket to VOICE_PUBLIC_URL (Next's proxy doesn't carry WebSockets).
   VOICE_MODEL: z.string().default("gemini-3.8-live"),
   VOICE_LOCATION: z.string().default("us-central1"),
+  // One of Gemini Live's prebuilt voices; Despina matches the launch film's narrator.
+  VOICE_NAME: z.string().default("Despina"),
   VOICE_PUBLIC_URL: z.string().default("ws://localhost:4000"),
   VOICE_DAILY_MINUTES: z.coerce.number().int().min(1).default(15),
   VOICE_SESSION_MINUTES: z.coerce.number().int().min(1).default(10),
@@ -103,6 +107,7 @@ export const config = {
     workerMetricsPort: env.WORKER_METRICS_PORT,
     publicWebUrl: env.PUBLIC_WEB_URL.replace(/\/+$/, ""),
     webOrigins: env.WEB_ORIGINS,
+    trustProxyHops: env.TRUST_PROXY_HOPS,
   },
 
   database: { url: env.DATABASE_URL },
@@ -157,6 +162,7 @@ export const config = {
   voice: {
     model: env.VOICE_MODEL,
     location: env.VOICE_LOCATION,
+    voiceName: env.VOICE_NAME,
     publicUrl: env.VOICE_PUBLIC_URL.replace(/\/+$/, ""),
     dailyMinutes: env.VOICE_DAILY_MINUTES,
     sessionMinutes: env.VOICE_SESSION_MINUTES,

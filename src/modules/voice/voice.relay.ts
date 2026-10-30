@@ -131,7 +131,7 @@ async function session(client: WebSocket, t: Ticket) {
     });
 
   const { project } = config.gemini;
-  const { location, model } = config.voice;
+  const { location, model, voiceName } = config.voice;
   const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
   const upstream = new WebSocket(`wss://${host}/ws/google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent?key=${encodeURIComponent(config.gemini.apiKey)}`);
   const up = (m: Record<string, unknown>) => upstream.readyState === WebSocket.OPEN && upstream.send(JSON.stringify(m));
@@ -180,7 +180,7 @@ async function session(client: WebSocket, t: Ticket) {
     up({
       setup: {
         model: `projects/${project}/locations/${location}/publishers/google/models/${model}`,
-        generationConfig: { responseModalities: ["AUDIO"] },
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } },
         systemInstruction: { parts: [{ text: instructions() }] },
         tools: [{ functionDeclarations: declarations }],
         inputAudioTranscription: {},
